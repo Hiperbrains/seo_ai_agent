@@ -12,13 +12,14 @@ import { createClaudePullRequest } from '../services/claudePr.service';
 import { logger } from '../utils/logger';
 import {
   buildScanReportPdf,
-  buildScanReportPdfFromPageReports,
+  renderPdf,
   suggestedFilename,
   ScanPdfIssueRow,
   ScanPdfMeta,
   SerpRankRow,
 } from '../services/pdfReport.service';
 import { loadScanReportFile } from '../services/reportFile.service';
+import { buildIntelligenceReport } from '../services/intelligenceReport.service';
 import { registerActiveScan, stopActiveScan, unregisterActiveScan } from '../services/scanTaskRegistry.service';
 import { fetchPageSpeedMetrics } from '../services/pagespeed.service';
 import { fetchSerpLiveRank, testSerpApiConnection } from '../services/serpapi.service';
@@ -148,6 +149,7 @@ async function buildSerpRankRowsForReports(
   return rows;
 }
 
+
 export async function getPageReportsJson(req: Request, res: Response): Promise<void> {
   try {
     const scanId = Number(req.params.scanId);
@@ -160,6 +162,7 @@ export async function getPageReportsJson(req: Request, res: Response): Promise<v
       res.status(404).json({ error: 'No page-level report file for this scan (run a new scan).' });
       return;
     }
+    const intelligenceReport = buildIntelligenceReport(stored);
     const reports = Object.values(stored.pageReports || {});
     const avg = (arr: number[]): number => {
       if (!arr.length) return 0;
@@ -197,9 +200,9 @@ export async function getPageReportsJson(req: Request, res: Response): Promise<v
     const uniqueExternalDomains = reports.reduce((n, r) => n + (r.backlinkInsights?.uniqueExternalDomainsLinked ?? 0), 0);
 
     const serpRankRows = await buildSerpRankRowsForReports(stored.domain, reports);
-
     const payload: any = {
       ...stored,
+      ...intelligenceReport,
       onPageAnalysis: {
         avgOnPageScore: avg(onPageScores),
         avgTechnicalScore: avg(technicalScores),
@@ -229,6 +232,8 @@ export async function getPageReportsJson(req: Request, res: Response): Promise<v
         rows: serpRankRows,
         note: 'Live Google positions for top keyword opportunities.',
       },
+      actionPlan: stored.actionPlan || [],
+      actionPlanItems: stored.actionPlanItems || [],
     };
     res.json(payload);
   } catch (e) {
@@ -252,29 +257,25 @@ export function getKeywordOpportunities(req: Request, res: Response): void {
       res.status(404).json({ error: 'No page-level report file for this scan (run a new scan).' });
       return;
     }
-
-    const opportunities = Object.values(stored.pageReports)
-      .map((rep) => ({
-        url: rep.url,
-        targetKeyword: rep.keywordInsights?.targetKeyword || '',
-        opportunityScore: rep.keywordInsights?.opportunityScore ?? 0,
-        trendBoost: rep.keywordInsights?.trendBoost ?? 0,
-        keywordPlacementScore: rep.keywordInsights?.keywordPlacementScore ?? 0,
-        rankingProbability: rep.keywordInsights?.rankingProbability ?? 0,
-        topIssues: rep.issues.slice(0, 3).map((i) => i.type),
+    const intelligenceReport = buildIntelligenceReport(stored);
+    const opportunities = intelligenceReport.keywordStrategy.primaryKeywords
+      .map((k: any) => ({
+        keyword: k.keyword,
+        category: 'domain_trend',
+        searchIntent: k.intent,
+        priorityScore: k.priorityScore,
+        opportunityScore: k.opportunityScore,
+        suggestedPageUrl: k.targetPage || '',
       }))
-      .sort((a, b) => {
-        if (b.opportunityScore !== a.opportunityScore) return b.opportunityScore - a.opportunityScore;
-        if (b.trendBoost !== a.trendBoost) return b.trendBoost - a.trendBoost;
-        return b.rankingProbability - a.rankingProbability;
-      })
+      .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (b.priorityScore - a.priorityScore))
       .slice(0, limit);
 
     res.json({
       scanId,
       domain: stored.domain,
       generatedAt: stored.generatedAt,
-      totalPages: Object.keys(stored.pageReports).length,
+      totalPages: intelligenceReport.summary.pagesAnalyzed,
+      totalTrendKeywords: intelligenceReport.dataQualityCheck.uniqueKeywords,
       items: opportunities,
     });
   } catch (e) {
@@ -510,9 +511,8 @@ export async function getScanReportPdf(req: Request, res: Response): Promise<voi
     const stored = loadScanReportFile(scanId);
     let pdf: Buffer;
     if (stored?.pageReports && Object.keys(stored.pageReports).length > 0) {
-      const reports = Object.values(stored.pageReports);
-      const serpRankRows = await buildSerpRankRowsForReports(row.domain, reports);
-      pdf = await buildScanReportPdfFromPageReports(meta, stored.pageReports, serpRankRows);
+      const report = buildIntelligenceReport(stored);
+      pdf = await renderPdf(report);
     } else {
       const issues = db
         .prepare(

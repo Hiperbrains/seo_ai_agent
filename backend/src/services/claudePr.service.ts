@@ -2,6 +2,7 @@ import { getSetting } from './db.service';
 import { logger } from '../utils/logger';
 import { getGithubRepoParts, getGithubToken } from './secrets.service';
 import { loadScanReportFile } from './reportFile.service';
+import { buildIntelligenceReport } from './intelligenceReportService';
 
 export type ClaudePrCreateResult = {
   ok: boolean;
@@ -51,6 +52,7 @@ export async function createClaudePullRequest(params: {
   }
   const report = loadScanReportFile(params.scanId);
   if (!report) return { ok: false, error: 'Report file not found for this scan.' };
+  const intelligenceReport = buildIntelligenceReport(report);
 
   const git = getGitRepoSettings();
   if (!git.owner || !git.repo) {
@@ -71,7 +73,7 @@ export async function createClaudePullRequest(params: {
     credentials: {
       githubToken: git.githubToken,
     },
-    auditReport: report,
+    auditReport: intelligenceReport,
     instructions:
       'Create a GitHub pull request that applies actionable SEO fixes based on this audit report. Return JSON with prUrl.',
   } as const;

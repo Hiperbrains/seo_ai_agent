@@ -1,5 +1,15 @@
 import { crawlDomain } from './crawler.service';
-import { analyzePagesWithAiWithSignals } from './aiAnalyzer.service';
+import {
+  analyzePagesWithAiWithSignals,
+  buildCompetitorKeywordGapsForReport,
+  buildKeywordActionPlanForReport,
+  buildKeywordActionPlanItemsForReport,
+  buildKeywordClustersForReport,
+  buildQuickWinsForReport,
+  buildTopOpportunitiesForReport,
+  extractProductFeaturesFromPages,
+  generateTrendKeywordsForDomain,
+} from './aiAnalyzer.service';
 import { createGithubIssue, formatIssueBody } from './github.service';
 import { sendReportEmail } from './email.service';
 import { getDb, getSetting, logActivity } from './db.service';
@@ -170,6 +180,14 @@ export async function runScanPipeline(
     throwIfAborted(abortSignal);
     const pageReports: Record<string, SeoPageReport> = {};
     for (const [u, r] of aiMap) pageReports[u] = r;
+    const extractedProductFeatures = extractProductFeaturesFromPages(pages);
+    const trendKeywords = await generateTrendKeywordsForDomain(domain, pages, aiMap, extractedProductFeatures);
+    const actionPlan = buildKeywordActionPlanForReport(aiMap, trendKeywords);
+    const actionPlanItems = buildKeywordActionPlanItemsForReport(aiMap, trendKeywords);
+    const competitorKeywordGaps = buildCompetitorKeywordGapsForReport(aiMap);
+    const keywordClusters = buildKeywordClustersForReport(trendKeywords);
+    const quickWins = buildQuickWinsForReport(trendKeywords, aiMap);
+    const topOpportunities = buildTopOpportunitiesForReport(trendKeywords);
 
     const scores = [...aiMap.values()].map((a) => a.seoScore).filter((s) => s > 0);
     const seoScoreAvg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
@@ -178,7 +196,19 @@ export async function runScanPipeline(
       `UPDATE scans SET completed_at = datetime('now'), pages_count = ?, seo_score_avg = ?, status = 'completed' WHERE id = ?`
     ).run(pages.length, seoScoreAvg, effectiveScanId);
 
-    saveScanReportFile(effectiveScanId, domain, pageReports, pages);
+    saveScanReportFile(
+      effectiveScanId,
+      domain,
+      pageReports,
+      trendKeywords,
+      actionPlan,
+      actionPlanItems,
+      competitorKeywordGaps,
+      keywordClusters,
+      quickWins,
+      topOpportunities,
+      pages
+    );
     db.prepare('DELETE FROM issues WHERE scan_id = ?').run(effectiveScanId);
     const insertIssue = db.prepare(
       `INSERT INTO issues (scan_id, page_url, issue_type, message, ai_suggestion, status, seo_score, code_snippet, code_diff)

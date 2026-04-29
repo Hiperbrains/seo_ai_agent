@@ -5,11 +5,12 @@ import { getDb } from './db.service';
 import { loadScanReportFile } from './reportFile.service';
 import {
   buildScanReportPdf,
-  buildScanReportPdfFromPageReports,
+  renderPdf,
   ScanPdfIssueRow,
   ScanPdfMeta,
   suggestedFilename,
 } from './pdfReport.service';
+import { buildIntelligenceReport } from './intelligenceReport.service';
 
 export interface EmailReportPayload {
   scanId?: number;
@@ -56,7 +57,7 @@ async function buildDownloadPdfAttachment(scanId: number): Promise<{ filename: s
 
   const stored = loadScanReportFile(scanId);
   const pdf = stored?.pageReports && Object.keys(stored.pageReports).length > 0
-    ? await buildScanReportPdfFromPageReports(meta, stored.pageReports)
+    ? await renderPdf(buildIntelligenceReport(stored))
     : await buildScanReportPdf(
         meta,
         db

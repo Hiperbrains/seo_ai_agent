@@ -12,6 +12,7 @@ export interface SerpLiveRankResult {
 }
 
 type SerpResultItem = { position: number; title: string; link: string; snippet: string };
+export type ExternalTrendSignal = { keyword: string; source: 'serpapi_related'; confidence: number };
 
 function getSerpApiKey(): string {
   return getSetting('SERPAPI_KEY') || process.env.SERPAPI_KEY || '';
@@ -100,5 +101,51 @@ export async function testSerpApiConnection(keyword = 'seo audit tools'): Promis
     checkedKeyword: keyword,
     organicCount: r.topResults.length,
   };
+}
+
+export async function fetchTrendSeedKeywords(
+  seeds: string[],
+  location = 'India'
+): Promise<ExternalTrendSignal[]> {
+  const apiKey = getSerpApiKey();
+  if (!apiKey) return [];
+  const cleanedSeeds = [...new Set(seeds.map((s) => s.trim()).filter((s) => s.length >= 3))].slice(0, 3);
+  const out = new Map<string, ExternalTrendSignal>();
+  for (const seed of cleanedSeeds) {
+    const qs = new URLSearchParams({
+      engine: 'google',
+      q: `${seed} trends`,
+      location,
+      google_domain: 'google.com',
+      gl: 'in',
+      hl: 'en',
+      num: '10',
+      api_key: apiKey,
+    });
+    try {
+      const resp = await fetch(`https://serpapi.com/search.json?${qs.toString()}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!resp.ok) continue;
+      const json = (await resp.json()) as any;
+      const suggestions: string[] = [];
+      for (const q of Array.isArray(json?.related_questions) ? json.related_questions : []) {
+        const question = String(q?.question || '').trim();
+        if (question) suggestions.push(question);
+      }
+      for (const r of Array.isArray(json?.related_searches) ? json.related_searches : []) {
+        const query = String(r?.query || '').trim();
+        if (query) suggestions.push(query);
+      }
+      for (const s of suggestions) {
+        const key = s.toLowerCase();
+        if (!out.has(key)) out.set(key, { keyword: s, source: 'serpapi_related', confidence: 60 });
+      }
+    } catch {
+      // Do not fail scan if external trend signal fetch fails.
+    }
+  }
+  return [...out.values()].slice(0, 20);
 }
 
