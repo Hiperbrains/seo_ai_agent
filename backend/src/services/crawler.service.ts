@@ -336,10 +336,17 @@ export async function crawlDomain(domainInput: string, abortSignal?: AbortSignal
       const canonical = extractAttr(canonicalTag, 'href');
       const h1Matches = html.match(/<h1\b[^>]*>/gi) ?? [];
       const h2Matches = html.match(/<h2\b[^>]*>/gi) ?? [];
-      const headings = [...html.matchAll(/<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/gi)]
+      const h1Bodies = [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)]
         .map((m) => stripTags(m[1] || ''))
+        .map((t) => t.replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      const h1Text = h1Bodies[0] || '';
+      const subHeadings = [...html.matchAll(/<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/gi)]
+        .map((m) => stripTags(m[1] || ''))
+        .map((t) => t.replace(/\s+/g, ' ').trim())
         .filter(Boolean)
         .slice(0, 15);
+      const headings = [h1Text, ...subHeadings].filter(Boolean).slice(0, 16);
       const links = extractLinks(html, baseOrigin);
       const text = stripTags(html);
       const wordCount = text ? text.split(/\s+/).filter(Boolean).length : 0;
@@ -363,7 +370,7 @@ export async function crawlDomain(domainInput: string, abortSignal?: AbortSignal
         title,
         metaDescription,
         canonical,
-        h1Count: h1Matches.length,
+        h1Count: Math.max(h1Matches.length, h1Text ? 1 : 0),
         h2Count: h2Matches.length,
         wordCount,
         headings,

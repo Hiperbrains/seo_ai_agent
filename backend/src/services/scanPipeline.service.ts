@@ -182,9 +182,10 @@ export async function runScanPipeline(
     for (const [u, r] of aiMap) pageReports[u] = r;
     const extractedProductFeatures = extractProductFeaturesFromPages(pages);
     const trendKeywords = await generateTrendKeywordsForDomain(domain, pages, aiMap, extractedProductFeatures);
+    const trendKeywordsStored = trendKeywords.length ? trendKeywords : null;
     const actionPlan = buildKeywordActionPlanForReport(aiMap, trendKeywords);
     const actionPlanItems = buildKeywordActionPlanItemsForReport(aiMap, trendKeywords);
-    const competitorKeywordGaps = buildCompetitorKeywordGapsForReport(aiMap);
+    const competitorKeywordGaps = buildCompetitorKeywordGapsForReport(aiMap, domain, pages);
     const keywordClusters = buildKeywordClustersForReport(trendKeywords);
     const quickWins = buildQuickWinsForReport(trendKeywords, aiMap);
     const topOpportunities = buildTopOpportunitiesForReport(trendKeywords);
@@ -200,7 +201,7 @@ export async function runScanPipeline(
       effectiveScanId,
       domain,
       pageReports,
-      trendKeywords,
+      trendKeywordsStored,
       actionPlan,
       actionPlanItems,
       competitorKeywordGaps,

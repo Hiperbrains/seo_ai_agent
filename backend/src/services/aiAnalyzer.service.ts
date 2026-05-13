@@ -207,7 +207,7 @@ function expandByIntent(keyword: string): {
   return {
     transactional: [`${k} software`, `${k} platform`, `${k} solution`].map(cleanTrendKeyword),
     informational: [`how to ${k}`, `what is ${k}`, `${k} process`].map(cleanTrendKeyword),
-    comparison: [`${k} vs ats`, `best ${k} tools`, `${k} alternatives`].map(cleanTrendKeyword),
+    comparison: [`${k} vs alternatives`, `best ${k} tools`, `${k} comparison`].map(cleanTrendKeyword),
   };
 }
 
@@ -240,6 +240,7 @@ function enrichWithExpandedKeywords(
   pageReports: Map<string, SeoPageReport>,
   trendMap: Map<string, TrendMetric>
 ): TrendKeywordInsight[] {
+  if (!rows.length) return [];
   const expanded: TrendKeywordInsight[] = [];
   for (const row of rows.slice(0, 6)) {
     const byIntent = expandByIntent(row.keyword);
@@ -318,8 +319,8 @@ function mapKeywordToBestPageUrl(keyword: string, pages: CrawlPageResult[], doma
       matchScore(kTokens, expandTokens(tokenize(contentText))) * 0.2;
     if (weighted > best.score) best = { url: p.url, score: weighted };
   }
-  // Threshold fallback: if signal is too weak, use homepage.
-  if (best.score < 0.28) return bestHomepageUrl(pages, domain);
+  // Require stronger token overlap than picking a random page that only shares the brand name.
+  if (best.score < 0.38) return bestHomepageUrl(pages, domain);
   return best.url;
 }
 
@@ -452,7 +453,6 @@ function normalizeReport(raw: Partial<SeoPageReport>, pageUrl: string): SeoPageR
 
 function normalizeTrendKeywords(
   raw: TrendKeywordsAiResponse | null | undefined,
-  fallback: TrendKeywordInsight[],
   pages: CrawlPageResult[],
   domain: string,
   trendMap: Map<string, TrendMetric>,
@@ -524,7 +524,7 @@ function normalizeTrendKeywords(
     .sort((a, b) => b.priorityScore - a.priorityScore)
     .slice(0, 12)
   );
-  return normalized.length ? normalized : fallback;
+  return normalized.length ? normalized : [];
 }
 
 function buildTrendKeywordPrompt(
@@ -546,23 +546,24 @@ function buildTrendKeywordPrompt(
 
 Generate trend-focused keyword opportunities for this website.
 Use realistic SEO logic (freshness, intent, topic fit, and likely traffic potential).
-Focus on product, feature, and problem-intent keywords.
+Infer the site's industry and offers ONLY from "domain" and "pageSamples" (titles, headings, URLs). Ignore any productFeatures entries that clearly conflict with what the sampled pages are about.
+Do NOT assume recruitment, ATS, or hiring tech unless pageSamples clearly show that niche.
 Do NOT generate generic navigation keywords (about, contact, book demo, enterprise, resellers, pricing).
-Do NOT create fake trend terms by simply appending year to generic page names.
+Do NOT create fake trend terms by simply appending a year to generic page names.
 Ensure output includes all 4 categories where possible: domain_trend, long_tail, blog_tofu, bofu_comparison.
 For each keyword, provide updateAreas from this list: title, h1, meta_description, body_content, internal_links.
 ONLY generate keywords that:
 - are real search-style Google queries
 - are natural phrases (not robotic)
 - are not repetitive variations
-- reflect real hiring/recruitment problems
+- match the site's actual products, services, or problems implied by pageSamples
 BAD examples:
-- ai hiring tools
-- best ai hiring platform tools
-GOOD examples:
-- AI hiring platform for startups
-- automate recruitment process using AI
-- candidate screening software for recruiters
+- generic page name + year only
+- unrelated vertical (e.g. hiring software for a manufacturing IT services site)
+GOOD examples (illustrative only — adapt to the real niche):
+- enterprise cloud migration strategy
+- low code automation for financial services
+- salesforce integration best practices
 Return JSON only.
 
 Input:
@@ -590,8 +591,8 @@ Output schema:
       "suggestedPageUrl": "https://example.com/some-page",
       "updateAreas": ["title", "h1", "meta_description"],
       "priorityScore": 85,
-      "seoCluster": "AI recruitment automation",
-      "blogTopic": "Future of AI hiring in 2026",
+      "seoCluster": "Core service theme from samples",
+      "blogTopic": "Educational angle aligned to the same theme",
       "sourceSignals": ["product_features", "existing_keywords", "external_trend_data"]
     }
   ]
@@ -605,6 +606,112 @@ function getProductFeatures(): string[] {
     .map((x) => x.trim())
     .filter((x) => x.length >= 2)
     .slice(0, 25);
+}
+
+const DOMAIN_SEED_STOP = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'your',
+  'from',
+  'that',
+  'this',
+  'our',
+  'are',
+  'was',
+  'has',
+  'have',
+  'home',
+  'page',
+  'blog',
+  'news',
+  'read',
+  'more',
+  'get',
+  'use',
+  'all',
+  'new',
+  'top',
+]);
+
+/** Derive short topic seeds from the crawled site (titles, headings, slugs) — not from a fixed vertical. */
+export function extractDomainSeedPhrases(pages: CrawlPageResult[], domainInput: string): string[] {
+  const host = domainInput
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split('/')[0]
+    .toLowerCase();
+  const brandToken = host.split('.').filter(Boolean)[0] || 'site';
+  const brandPhrase = brandToken.replace(/[^a-z0-9-]/gi, '').replace(/-/g, ' ').trim() || 'site';
+  const seeds = new Set<string>();
+  if (brandPhrase.length >= 2) {
+    seeds.add(`${brandPhrase} services`);
+    seeds.add(`${brandPhrase} solutions`);
+  }
+
+  const pushNgrams = (raw: string) => {
+    const words = raw
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !DOMAIN_SEED_STOP.has(w));
+    for (let i = 0; i < words.length - 1; i++) {
+      const bi = `${words[i]} ${words[i + 1]}`;
+      if (bi.length >= 6) seeds.add(bi);
+    }
+    for (let i = 0; i < words.length - 2; i++) {
+      const tri = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+      if (tri.length >= 10 && tri.length <= 70) seeds.add(tri);
+    }
+  };
+
+  for (const p of pages.slice(0, 30)) {
+    try {
+      const slug = new URL(p.url).pathname.split('/').filter(Boolean).slice(-1)[0]?.replace(/[-_]+/g, ' ') || '';
+      if (slug.length > 3) pushNgrams(slug);
+    } catch {
+      /* ignore */
+    }
+    const blob = [p.title, ...(p.headings || []).slice(0, 3), p.metaDescription || ''].join(' ');
+    pushNgrams(blob);
+    const titleShort = p.title
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (titleShort.length >= 10 && titleShort.length <= 72) seeds.add(titleShort);
+  }
+
+  return [...seeds]
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter((s) => s.length >= 4 && s.length <= 85)
+    .slice(0, 14);
+}
+
+function minimalCrawlPagesFromReports(pageReports: Map<string, SeoPageReport>): CrawlPageResult[] {
+  const out: CrawlPageResult[] = [];
+  for (const [url, r] of pageReports.entries()) {
+    const h1 = r.improvedContent?.h1 || '';
+    out.push({
+      url,
+      title: r.suggestedTitle || '',
+      metaDescription: r.suggestedMetaDescription || '',
+      canonical: '',
+      h1Count: h1 ? 1 : 0,
+      h2Count: 0,
+      wordCount: 0,
+      headings: h1 ? [h1] : [],
+      links: [],
+      imagesWithoutAlt: 0,
+      brokenLinks: [],
+      invalidNavLinks: [],
+      loadTimeMs: 0,
+      contentSnippet: r.improvedContent?.bodyCopy,
+    });
+  }
+  return out;
 }
 
 function inferFeaturesFromText(text: string): string[] {
@@ -664,82 +771,38 @@ function getCurrentKeywords(pageReports: Map<string, SeoPageReport>): string[] {
   return [...set].slice(0, 20);
 }
 
-function buildFallbackTrendKeywords(
-  pages: CrawlPageResult[],
-  pageReports: Map<string, SeoPageReport>,
-  productFeatures: string[] = [],
-  domain = '',
-  trendMap: Map<string, TrendMetric> = new Map()
-): TrendKeywordInsight[] {
-  const featureSeeds = productFeatures
-    .map((f) => f.toLowerCase().trim())
-    .filter((f) => f.length >= 3)
-    .slice(0, 8);
-  const defaultSeeds = [
-    'ai hiring platform',
-    'recruitment automation software',
-    'candidate screening automation',
-    'technical hiring platform',
-  ];
-  const seeds = [...new Set([...featureSeeds, ...defaultSeeds])].slice(0, 8);
-  const out: TrendKeywordInsight[] = [];
-  for (const seed of seeds) {
-    const intentTemplates = expandByIntent(seed);
-    const variants = [
-      ...intentTemplates.transactional,
-      ...intentTemplates.informational,
-      ...intentTemplates.comparison,
-      `${seed} for recruiters`,
-      ...expandKeywords(seed),
-    ];
-    for (const v of variants) {
-      const keyword = v.replace(/\s+/g, ' ').trim().slice(0, 85);
-      if (!keyword || GENERIC_NAV_KEYWORDS.has(keyword)) continue;
-      const intent = (keyword.startsWith('how to') ? 'informational' : 'commercial') as TrendKeywordInsight['searchIntent'];
-      const simulatedVolume = 100 + keyword.length * 10;
-      const simulatedDifficulty = keyword.split(' ').length * 10;
-      const syntheticMetric = {
-        searchVolume: Math.max(20, Math.min(100, simulatedVolume)),
-        trend: Math.max(20, Math.min(100, 100 - simulatedDifficulty)),
-      };
-      const serpSignals = getSerpSignals(keyword);
-      const priorityScore = computePriorityScore(
-        keyword,
-        intent,
-        trendMap.get(cleanTrendKeyword(keyword)) || syntheticMetric,
-        serpSignals
-      );
-      out.push({
-        keyword,
-        category: classifyTrendKeyword(keyword),
-        searchIntent: intent,
-        reason: 'Fallback keyword derived from product features and problem-intent phrases, not generic page names.',
-        suggestedPageUrl: mapKeywordToBestPageUrl(keyword, pages, domain),
-        updateAreas: inferUpdateAreas(
-          keyword,
-          mapKeywordToBestPageUrl(keyword, pages, domain),
-          pageReports
-        ),
-        serpSignals,
-        recommendedWordCount: getRecommendedContentLength(keyword, intent),
-        priorityScore,
-        opportunityScore: computeOpportunityScore(priorityScore, serpSignals, true),
-        seoCluster: 'Product-led SEO',
-        blogTopic: `Guide: ${keyword}`,
-        sourceSignals: ['fallback_from_product_features', 'problem_intent_templates'],
-      });
+function buildDynamicCompetitorGapKeywords(domain: string, pages: CrawlPageResult[], currentKeywords: string[]): string[] {
+  const seeds = extractDomainSeedPhrases(pages, domain).slice(0, 5);
+  const gaps: string[] = [];
+  const push = (k: string) => {
+    const t = k.replace(/\s+/g, ' ').trim();
+    if (t.length >= 8 && t.length < 92) gaps.push(t);
+  };
+  for (const s of seeds) {
+    if (!s) continue;
+    push(`best ${s} software`);
+    push(`${s} implementation guide`);
+    push(`what is ${s}`);
+    push(`${s} vs alternatives`);
+  }
+  if (gaps.length < 4) {
+    const host = domain
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .split('.')[0]
+      ?.replace(/[^a-z0-9-]/gi, '')
+      .replace(/-/g, ' ')
+      .trim();
+    if (host && host.length >= 2) {
+      push(`best ${host} platform`);
+      push(`what is ${host}`);
+      push(`${host} services comparison`);
     }
   }
-  return dedupeAndCleanKeywords(out)
-    .filter((x) => !isWeakKeywordPattern(x.keyword))
-    .slice(0, 12);
+  return [...new Set(gaps)].slice(0, 8);
 }
 
-function competitorKeywordSet(): string[] {
-  return ['AI recruitment software', 'ATS automation tools', 'AI hiring platform', 'candidate screening software'];
-}
-
-function competitorKeywordGaps(currentKeywords: string[]): CompetitorGapItem[] {
+function competitorKeywordGaps(currentKeywords: string[], domain: string, pages: CrawlPageResult[]): CompetitorGapItem[] {
   const current = new Set(currentKeywords.map((k) => cleanTrendKeyword(k)));
   const expandedInternal = new Set<string>();
   for (const k of currentKeywords) {
@@ -748,12 +811,12 @@ function competitorKeywordGaps(currentKeywords: string[]): CompetitorGapItem[] {
       expandedInternal.add(cleanTrendKeyword(x));
     }
   }
-  return competitorKeywordSet()
+  return buildDynamicCompetitorGapKeywords(domain, pages, currentKeywords)
     .filter((k) => !current.has(cleanTrendKeyword(k)) && !expandedInternal.has(cleanTrendKeyword(k)))
     .slice(0, 8)
     .map((keyword) => ({
       keyword,
-      reason: 'Missing from site coverage',
+      reason: 'Missing from site coverage (derived from crawled topics)',
       opportunityScore: computeOpportunityScore(
         computePriorityScore(keyword, 'commercial', { searchVolume: 70, trend: 60 }, getSerpSignals(keyword)),
         getSerpSignals(keyword),
@@ -837,8 +900,13 @@ export function buildKeywordActionPlanItemsForReport(
   return generateActionPlanItems(pageReports, trendKeywords);
 }
 
-export function buildCompetitorKeywordGapsForReport(pageReports: Map<string, SeoPageReport>): CompetitorGapItem[] {
-  return competitorKeywordGaps(getCurrentKeywords(pageReports));
+export function buildCompetitorKeywordGapsForReport(
+  pageReports: Map<string, SeoPageReport>,
+  domain = '',
+  pages: CrawlPageResult[] = []
+): CompetitorGapItem[] {
+  const crawlPages = pages.length ? pages : minimalCrawlPagesFromReports(pageReports);
+  return competitorKeywordGaps(getCurrentKeywords(pageReports), domain, crawlPages);
 }
 
 export function buildKeywordClustersForReport(trendKeywords: TrendKeywordInsight[]): KeywordClusterItem[] {
@@ -891,18 +959,21 @@ export async function generateTrendKeywordsForDomain(
 ): Promise<TrendKeywordInsight[]> {
   const settingFeatures = getProductFeatures();
   const pageFeatures = extractedProductFeatures.map((x) => x.feature);
-  const productFeatures = [...new Set([...settingFeatures, ...pageFeatures])].slice(0, 25);
+  const topicSeeds = extractDomainSeedPhrases(pages, domain);
+  const productFeatures = [...new Set([...topicSeeds, ...pageFeatures, ...settingFeatures])].slice(0, 25);
   const currentKeywords = getCurrentKeywords(pageReports);
-  const competitorKeywords = competitorKeywordGaps(currentKeywords).map((x) => x.keyword);
+  const competitorKeywords = competitorKeywordGaps(currentKeywords, domain, pages).map((x) => x.keyword);
   const externalTrendRows = await fetchTrendSeedKeywords(
     [...currentKeywords.slice(0, 4), ...productFeatures.slice(0, 3)],
     'India'
   );
   const trendMap = buildTrendMap(externalTrendRows);
-  const fallback = buildFallbackTrendKeywords(pages, pageReports, productFeatures, domain, trendMap);
   const externalTrendSignals = externalTrendRows.map((x) => x.keyword);
   const key = getOpenAiKey();
-  if (!key) return fallback;
+  if (!key) {
+    logger.warn('OpenAI API key missing; trendKeywords not generated (no fallback).', { domain });
+    return [];
+  }
   try {
     const client = new OpenAI({ apiKey: key });
     const completion = await client.chat.completions.create({
@@ -932,11 +1003,14 @@ export async function generateTrendKeywordsForDomain(
     });
     const text = completion.choices[0]?.message?.content?.trim() || '{}';
     const parsed = JSON.parse(text) as TrendKeywordsAiResponse;
-    const normalized = normalizeTrendKeywords(parsed, fallback, pages, domain, trendMap, pageReports);
+    const normalized = normalizeTrendKeywords(parsed, pages, domain, trendMap, pageReports);
+    if (!normalized.length) {
+      logger.warn('OpenAI returned no usable trend keywords after normalization.', { domain });
+    }
     return enrichWithExpandedKeywords(normalized, pages, domain, pageReports, trendMap);
   } catch (e) {
-    logger.warn('OpenAI trend keyword generation failed; using local fallback.', { domain, error: String(e) });
-    return fallback;
+    logger.warn('OpenAI trend keyword generation failed; no fallback keywords returned.', { domain, error: String(e) });
+    return [];
   }
 }
 
@@ -1016,20 +1090,23 @@ function h1Suggestion(page: CrawlPageResult): string {
 function bodyCopySuggestion(page: CrawlPageResult): string {
   const topic = pageTopic(page) || 'this page';
   const keyword = extractRealKeyword(page) || topic.toLowerCase();
-  const features = inferFeaturesFromText(`${page.title} ${(page.headings || []).join(' ')} ${page.contentSnippet || ''}`);
+  const pool = `${page.title} ${(page.headings || []).join(' ')} ${page.contentSnippet || ''}`;
+  const features = inferFeaturesFromText(pool);
+  const tokens = tokenize(pool).filter((t) => t.length > 4);
+  const genericCaps = ['clarity', 'workflow automation', 'integration readiness', 'scalable delivery'];
   const [feature1, feature2, feature3] = [
-    features[0] || 'automated screening',
-    features[1] || 'candidate matching',
-    features[2] || 'interview automation',
+    features[0] || tokens[0] || genericCaps[0],
+    features[1] || tokens[1] || genericCaps[1],
+    features[2] || tokens[2] || genericCaps[2],
   ];
-  const mainProblem = page.url.includes('/blog')
-    ? 'unclear hiring strategy and slow talent decisions'
-    : 'slow, manual recruitment workflows';
-  const [benefit1, benefit2] = ['time-to-hire', 'candidate quality'];
+  const mainProblem = page.url.toLowerCase().includes('/blog')
+    ? 'fragmented information and weak topical depth'
+    : 'operational friction and unclear value for visitors';
+  const [benefit1, benefit2] = ['clarity for buyers', 'conversion and trust'];
   return (
-    `${keyword} is a solution that helps companies solve ${mainProblem}. ` +
-    `It enables ${feature1}, ${feature2}, and ${feature3}. ` +
-    `Use this to improve ${benefit1} and ${benefit2}.`
+    `${keyword} addresses ${mainProblem} for teams evaluating ${topic.toLowerCase()}. ` +
+    `It highlights ${feature1}, ${feature2}, and ${feature3}. ` +
+    `Strengthen this narrative to improve ${benefit1} and ${benefit2}.`
   ).slice(0, 700);
 }
 

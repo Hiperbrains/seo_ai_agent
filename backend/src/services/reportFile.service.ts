@@ -19,7 +19,7 @@ export interface StoredScanReport {
   domain: string;
   generatedAt: string;
   pageReports: Record<string, SeoPageReport>;
-  trendKeywords?: TrendKeywordInsight[];
+  trendKeywords?: TrendKeywordInsight[] | null;
   actionPlan?: string[];
   actionPlanItems?: SeoActionPlanItem[];
   competitorKeywordGaps?: CompetitorGapItem[];
@@ -33,7 +33,7 @@ export function saveScanReportFile(
   scanId: number,
   domain: string,
   pageReports: Record<string, SeoPageReport>,
-  trendKeywords?: TrendKeywordInsight[],
+  trendKeywords?: TrendKeywordInsight[] | null,
   actionPlan?: string[],
   actionPlanItems?: SeoActionPlanItem[],
   competitorKeywordGaps?: CompetitorGapItem[],

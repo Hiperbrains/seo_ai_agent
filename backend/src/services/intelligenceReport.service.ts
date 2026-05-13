@@ -296,7 +296,26 @@ export type IntelligenceReport = {
 const GENERIC_KEYWORDS = new Set(['about', 'contact', 'home', 'page', 'welcome']);
 const FILLER_PATTERNS = ['solution', 'tools', 'software tools', 'platform solution'];
 const INTENT_INDICATORS = ['what', 'how', 'best', 'vs', 'for', 'alternatives'];
-const NOUN_HINTS = ['platform', 'hiring', 'recruitment', 'software', 'candidate', 'ats', 'screening', 'interview'];
+const NOUN_HINTS = [
+  'platform',
+  'software',
+  'services',
+  'solutions',
+  'consulting',
+  'automation',
+  'integration',
+  'cloud',
+  'development',
+  'implementation',
+  'management',
+  'digital',
+  'hiring',
+  'recruitment',
+  'candidate',
+  'ats',
+  'screening',
+  'interview',
+];
 
 function isInvalidKeyword(kw: string): boolean {
   const k = String(kw || '').toLowerCase().trim();
@@ -320,9 +339,12 @@ function isSearchLike(keyword: string): boolean {
   const k = String(keyword || '').toLowerCase().trim();
   const hasIntent = INTENT_INDICATORS.some((x) => k.includes(x));
   const hasTransactionalShape =
+    (k.includes('platform') || k.includes('software') || k.includes('services') || k.includes('solutions')) &&
+    (k.length > 12 || k.includes('for') || k.includes('best'));
+  const hiringTxn =
     (k.includes('hiring') || k.includes('recruitment') || k.includes('candidate')) &&
     (k.includes('platform') || k.includes('software'));
-  return hasIntent || hasTransactionalShape;
+  return hasIntent || hasTransactionalShape || hiringTxn;
 }
 
 function normalizeKeywordGrammar(keyword: string): string {
@@ -330,6 +352,7 @@ function normalizeKeywordGrammar(keyword: string): string {
   k = k.replace(/\bhow how to\b/g, 'how to');
   k = k.replace(/\bhow to works\b/g, 'how it works');
   k = k.replace(/\bwhat is how to\b/g, '');
+  k = k.replace(/\bwhat is what\b/g, 'what is');
   k = k.replace(/\bhow to platform\b/g, 'how to use platform');
   k = k.replace(/\bhow to software\b/g, 'how to use software');
   k = k.replace(/\bhow how\b/g, 'how');
@@ -384,11 +407,11 @@ function inferIntentFromKeyword(keyword: string): NormalizedKeyword['searchInten
 
 function generateIntentKeywords(baseKeyword: string, pageContext: string): Array<{ keyword: string; category: NormalizedKeyword['category']; searchIntent: NormalizedKeyword['searchIntent'] }> {
   const base = normalizePhrase(baseKeyword).replace(/\b(solution|tools|software tools|platform solution)\b/g, '').replace(/\s+/g, ' ').trim();
-  const context = normalizePhrase(pageContext || 'recruitment');
-  const ctx = context.includes('staffing') ? 'staffing agencies' : context.includes('startup') ? 'startups' : 'recruiters';
+  const context = normalizePhrase(pageContext || 'business');
+  const ctx = context.includes('staffing') ? 'staffing agencies' : context.includes('startup') ? 'startups' : 'teams';
   const transactional = [`${base} platform`, `${base} software`];
   const informational = [`what is ${base}`, `how ${base} works`];
-  const comparison = [`${base} vs ats`, `${base} alternatives`];
+  const comparison = [`${base} vs alternatives`, `best ${base} comparison`];
   const longTail = [`${base} for startups`, `${base} for ${ctx}`];
   return [
     ...transactional.map((keyword) => ({ keyword, category: 'domain_trend' as const, searchIntent: 'transactional' as const })),
@@ -398,29 +421,48 @@ function generateIntentKeywords(baseKeyword: string, pageContext: string): Array
   ];
 }
 
+function collapseDuplicateWords(s: string): string {
+  return String(s || '')
+    .replace(/\b(\w+)(\s+\1\b)+/gi, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function generateNaturalHeading(keyword: string): string {
-  const k = normalizeKeywordGrammar(keyword);
-  const core = k
+  let k = normalizeKeywordGrammar(keyword);
+  if (/^best what\b/i.test(k)) k = k.replace(/^best what\b/i, 'what is');
+  const coreRaw = k
     .replace(/^what is\s+/, '')
     .replace(/^how\s+/, '')
     .replace(/\s+works$/, '')
-    .replace(/\s+vs\s+ats.*/, '')
+    .replace(/\s+vs\s+alternatives.*$/i, '')
     .trim();
+  const core = collapseDuplicateWords(coreRaw);
+  const titleCaseWords = (s: string) =>
+    collapseDuplicateWords(s)
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim();
   let heading = '';
   if (/ vs /.test(k)) {
-    const p = k.split(' vs ');
-    heading = `${p[0].replace(/\b\w/g, (c) => c.toUpperCase())} vs ATS: Key Differences`;
+    const p = k.split(/\s+vs\s+/i);
+    const a = (p[0] || '').trim();
+    const b = (p[1] || 'alternatives').trim();
+    const titleCase = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase());
+    heading = `${titleCase(a)} vs ${titleCase(b)}`;
   } else if (k.startsWith('what is')) {
-    heading = `What Is ${core.replace(/\b\w/g, (c) => c.toUpperCase())}?`;
+    const fragment = titleCaseWords(core || coreRaw || k.replace(/^what is\s+/i, '').trim());
+    heading = fragment ? `What Is ${fragment}?` : 'What Is This Topic?';
   } else if (k.startsWith('how ')) {
-    heading = `How ${core.replace(/\b\w/g, (c) => c.toUpperCase())} Works`;
+    const fragment = titleCaseWords(core || coreRaw || k.replace(/^how\s+/i, '').trim());
+    heading = fragment ? `How ${fragment} Works` : 'How It Works';
   } else if (k.includes('for')) {
-    heading = `Best ${core.replace(/\b\w/g, (c) => c.toUpperCase())}`;
-  } else if (k.includes(' vs ')) {
-    heading = `${core.replace(/\b\w/g, (c) => c.toUpperCase())} vs ATS: Key Differences`;
+    const frag = titleCaseWords(core || coreRaw || k);
+    heading = frag ? `Best ${frag}` : titleCaseWords(k);
   } else {
-    heading = `${core.replace(/\b\w/g, (c) => c.toUpperCase())} for Faster Hiring`;
+    const frag = titleCaseWords(core || coreRaw || k);
+    heading = frag ? `${frag}: Overview` : `${titleCaseWords(k)}: Overview`;
   }
+  heading = collapseDuplicateWords(heading.replace(/\bWhat Is What\b/gi, 'What Is'));
   heading = heading.replace(/\b(\w+)( \1\b)+/gi, '$1').replace(/\s+/g, ' ').trim();
   return heading.slice(0, 60);
 }
@@ -439,7 +481,7 @@ function generateAnchorText(keyword: string): string | null {
   return short ? short.replace(/\b\w/g, (c) => c.toUpperCase()) : null;
 }
 
-function generateContentPlan(keyword: string, pageTypeValue: PageType): {
+function generateContentPlan(keyword: string, pageTypeValue: PageType, pageHeadline: string): {
   introParagraph: string;
   intro: string;
   additionalSections: string[];
@@ -447,23 +489,34 @@ function generateContentPlan(keyword: string, pageTypeValue: PageType): {
   faqSuggestions: string[];
   blogTopics: string[];
 } {
-  const k = normalizeKeywordGrammar(keyword);
-  const h1 = generateNaturalHeading(k);
+  const seoPhrase = normalizeKeywordGrammar(keyword);
+  const hub = topicLabelForSections(pageHeadline, 5);
+  const h1Preview = collapseDuplicateWords(pageHeadline.slice(0, 70)).trim() || hub;
   const sections =
     pageTypeValue === 'blog'
-      ? ['Introduction to AI Hiring', 'How AI Hiring Works', 'Benefits for Recruiters', 'Key Features to Look For']
-      : ['Product Overview', 'Core Features', 'Use Cases', 'Implementation Steps'];
+      ? [
+          `${hub}: background`,
+          `${hub}: what readers should validate`,
+          `${hub}: options and tradeoffs`,
+          `${hub}: recommended next steps`,
+        ]
+      : [
+          `${hub}: overview`,
+          `${hub}: scope and capabilities`,
+          `${hub}: typical outcomes`,
+          `${hub}: rollout considerations`,
+        ];
   const sectionDetails = sections.slice(0, 5).map((s) => ({
     heading: s,
-    points: ['Clear business problem statement', 'Practical implementation detail', 'Outcome-focused recommendation'],
+    points: ['Clarify the reader problem', 'Add concrete steps or examples', 'Tie recommendations to measurable outcomes'],
   }));
   return {
-    introParagraph: `${h1} helps teams improve hiring outcomes through clearer workflows, faster screening, and better candidate quality.`,
-    intro: `${h1} helps teams improve hiring outcomes through clearer workflows, faster screening, and better candidate quality.`,
+    introParagraph: `${h1Preview} should clarify who the page is for, the problem solved, and the primary call to action. Weave "${seoPhrase}" into body copy only where it fits naturally.`,
+    intro: `${h1Preview} should clarify who the page is for, the problem solved, and the primary call to action. Weave "${seoPhrase}" into body copy only where it fits naturally.`,
     additionalSections: sections,
     sectionDetails,
-    faqSuggestions: [`What is ${k}?`, `How does ${k} work?`, `What are the benefits of ${k}?`].map((x) => x.slice(0, 80)),
-    blogTopics: [`${h1}`, `Common mistakes in ${k}`, `${k} implementation guide`].map((x) => x.slice(0, 80)),
+    faqSuggestions: [`What should readers know about ${hub}?`, `How does ${hub} apply in practice?`, `What outcomes should teams expect?`].map((x) => x.slice(0, 80)),
+    blogTopics: [`${h1Preview}`, `Practical checklist for ${hub}`, `Measurement and follow-up for ${hub}`].map((x) => x.slice(0, 80)),
   };
 }
 
@@ -493,7 +546,7 @@ function generateImageSuggestions(pageUrl: string, keyword: string, pageTypeValu
       suggestedImageType: type,
       issue: 'missing representative visual',
       suggestion: {
-        altText: `${safeKeyword} dashboard showing candidate screening`.slice(0, 110),
+        altText: `${safeKeyword} product or service context`.slice(0, 110),
         filename: `${slugFromUrl(pageUrl)}-${type}.webp`,
         context: `Hero visual for ${safeKeyword}`,
       },
@@ -513,56 +566,73 @@ function finalKeywordQualityCheck(keywords: NormalizedKeyword[]): NormalizedKeyw
     seen.add(normalized);
     out.push({ ...row, keyword: normalized });
   }
-  if (!out.length) {
-    out.push({
-      keyword: 'ai hiring platform for recruiters',
-      category: 'long_tail',
-      searchIntent: 'commercial',
-      priorityScore: 60,
-      opportunityScore: 62,
-      suggestedPageUrl: '/',
-      updateAreas: ['title', 'h1', 'meta_description'],
-      recommendedWordCount: '900-1200',
-      competitionLevel: 'MEDIUM',
-      reason: 'Fallback safe keyword after quality gate.',
-      blogTopic: '',
-      seoCluster: 'ai hiring',
-    });
-  }
   return out;
+}
+
+function domainHostBrand(domain: string): string {
+  return domain
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split('/')[0]
+    .split('.')
+    .filter(Boolean)[0]
+    ?.toLowerCase()
+    .trim() || '';
+}
+
+/** Fix common crawl/display glitches in heading text. */
+function decodeBasicHtmlEntities(text: string): string {
+  return String(text || '')
+    .replace(/&#8217;|&#8216;|&#x2019;/gi, "'")
+    .replace(/&#8220;|&#8221;|&#x201c;|&#x201d;/gi, '"')
+    .replace(/&#038;|&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&#x27;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeHeadingDisplay(text: string): string {
+  const decoded = decodeBasicHtmlEntities(text);
+  return decoded
+    .replace(/\bCapabiltiies\b/gi, 'Capabilities')
+    .replace(/\bcapabiltiies\b/gi, 'capabilities')
+    .trim();
 }
 
 function mapKeywordToPageAdvanced(
   keyword: string,
   reports: Array<{ url: string; suggestedTitle?: string; improvedContent?: { h1?: string } }>,
   crawlByUrl: Map<string, CrawlPageResult>,
-  fallbackUrl?: string
+  domain: string
 ): string {
+  const brand = domainHostBrand(domain);
   const k = normalizePhrase(keyword);
-  const blog = reports.find((r) => /\/blog\//.test(r.url))?.url;
-  const comparison =
-    reports.find((r) => /(\/compare\/|\/alternatives|\/vs[-/])/.test(r.url))?.url ||
-    reports.find((r) => /\/blog\//.test(r.url))?.url;
-  const useCase =
-    reports.find((r) => /(startup|recruiter|staffing|enterprise|use-case|corporate-hr)/.test(r.url))?.url;
-  const product = reports.find((r) => /(product|feature|agent|platform|solution)/.test(r.url))?.url;
+  const kTokens = k.split(' ').filter((t) => t.length > 1);
+  const meaningfulTokens = kTokens.filter((t) => t !== brand && t.length > 2);
   const home = reports.find((r) => /\/$/.test(r.url))?.url || reports[0]?.url || '/';
 
-  if (/(what is|how|guide)/.test(k) && blog) return blog;
-  if (/(vs|alternative|compare)/.test(k) && comparison) return comparison;
-  if (/(for startups|for recruiters|for staffing)/.test(k) && useCase) return useCase;
-  if (/(software|platform)/.test(k) && product) return product;
-
-  let best = { url: fallbackUrl || home, score: -1 };
+  let best = { url: home, score: -1 };
   for (const r of reports) {
     const crawl = crawlByUrl.get(r.url);
-    const hay = normalizePhrase([r.suggestedTitle, r.improvedContent?.h1, crawl?.title, crawl?.headings?.[0], r.url].join(' '));
-    const score = normalizePhrase(keyword)
-      .split(' ')
-      .filter(Boolean)
-      .reduce((n, t) => n + (hay.includes(t) ? 1 : 0), 0);
+    const h1c = sanitizeHeadingDisplay(crawl?.headings?.[0] || '');
+    const pathSlug = normalizePhrase(slugFromUrl(r.url).replace(/-/g, ' '));
+    const hay = normalizePhrase(
+      [r.suggestedTitle, r.improvedContent?.h1, h1c, crawl?.title, crawl?.metaDescription, pathSlug].join(' ')
+    );
+    let score = kTokens.reduce((n, t) => n + (hay.includes(t) ? 1 : 0), 0);
+    if (brand && meaningfulTokens.length > 0) {
+      const strong = meaningfulTokens.filter((t) => hay.includes(t)).length;
+      if (strong === 0) score = Math.min(score, 1);
+    }
     if (score > best.score) best = { url: r.url, score };
   }
+
+  const needStrong = meaningfulTokens.length >= 2;
+  const minScore = needStrong ? 2 : 1;
+  if (best.score < minScore) return home;
   return best.url || home;
 }
 
@@ -582,7 +652,7 @@ function buildSemanticInternalLinks(
       }))
       .sort((a, b) => b.score - a.score || a.page.pageUrl.localeCompare(b.page.pageUrl))
       .slice(0, 3)
-      .filter((x) => x.score > 0);
+      .filter((x) => x.score >= 2);
     for (const r of related) {
       out.push({
         from: from.pageUrl,
@@ -599,6 +669,15 @@ function level(priority: number): 'HIGH' | 'MEDIUM' | 'LOW' {
   if (priority >= 75) return 'HIGH';
   if (priority >= 55) return 'MEDIUM';
   return 'LOW';
+}
+
+function domainBrandToken(scanData: StoredScanReport): string {
+  const raw = String(scanData.domain || '')
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split('/')[0]
+    .toLowerCase();
+  return raw.split('.').filter(Boolean)[0] || 'site';
 }
 
 function normalizeKeywords(scanData: StoredScanReport): {
@@ -644,7 +723,9 @@ function normalizeKeywords(scanData: StoredScanReport): {
     ...new Set(
       [
         ...out.map((k) => k.keyword),
-        ...Object.values(scanData.pageReports || {}).map((r) => normalizePhrase(r.keywordInsights?.targetKeyword || r.suggestedTitle || 'ai hiring platform')),
+        ...Object.values(scanData.pageReports || {}).map((r) =>
+          normalizePhrase(r.keywordInsights?.targetKeyword || r.suggestedTitle || '')
+        ),
       ]
         .map((k) => clusterRoot(k))
         .filter(Boolean)
@@ -691,32 +772,34 @@ function normalizeKeywords(scanData: StoredScanReport): {
   const hasInfo = diversified.some((k) => k.searchIntent === 'informational');
   const hasTxn = diversified.some((k) => k.searchIntent === 'transactional');
   const hasCmp = diversified.some((k) => /vs|alternative/.test(k.keyword));
-  const seed = baseSeeds[0] || 'ai hiring platform';
-  const ensure = generateIntentKeywords(seed, seed);
-  const addIfMissing = (predicate: boolean, matcher: (k: { keyword: string }) => boolean) => {
-    if (predicate) return;
-    const candidate = ensure.find((k) => matcher(k) && !seen.has(normalizeKeywordGrammar(normalizePhrase(k.keyword))));
-    if (!candidate) return;
-    const keyword = normalizeKeywordGrammar(normalizePhrase(candidate.keyword));
-    diversified.push({
-      keyword,
-      category: candidate.category,
-      searchIntent: candidate.searchIntent,
-      priorityScore: 55,
-      opportunityScore: 58,
-      suggestedPageUrl: '',
-      updateAreas: ['title', 'h1', 'meta_description'],
-      recommendedWordCount: candidate.searchIntent === 'informational' ? '1200-1600' : candidate.searchIntent === 'transactional' ? '700-1000' : '900-1200',
-      competitionLevel: 'MEDIUM',
-      reason: 'Intent coverage normalization.',
-      blogTopic: '',
-      seoCluster: clusterRoot(keyword),
-    });
-    seen.add(keyword);
-  };
-  addIfMissing(hasInfo, (k) => /^what is|^how /.test(normalizePhrase(k.keyword)));
-  addIfMissing(hasTxn, (k) => /platform|software/.test(normalizePhrase(k.keyword)));
-  addIfMissing(hasCmp, (k) => /vs|alternative/.test(normalizePhrase(k.keyword)));
+  const seed = baseSeeds[0];
+  if (seed) {
+    const ensure = generateIntentKeywords(seed, seed);
+    const addIfMissing = (predicate: boolean, matcher: (k: { keyword: string }) => boolean) => {
+      if (predicate) return;
+      const candidate = ensure.find((k) => matcher(k) && !seen.has(normalizeKeywordGrammar(normalizePhrase(k.keyword))));
+      if (!candidate) return;
+      const keyword = normalizeKeywordGrammar(normalizePhrase(candidate.keyword));
+      diversified.push({
+        keyword,
+        category: candidate.category,
+        searchIntent: candidate.searchIntent,
+        priorityScore: 55,
+        opportunityScore: 58,
+        suggestedPageUrl: '',
+        updateAreas: ['title', 'h1', 'meta_description'],
+        recommendedWordCount: candidate.searchIntent === 'informational' ? '1200-1600' : candidate.searchIntent === 'transactional' ? '700-1000' : '900-1200',
+        competitionLevel: 'MEDIUM',
+        reason: 'Intent coverage normalization.',
+        blogTopic: '',
+        seoCluster: clusterRoot(keyword),
+      });
+      seen.add(keyword);
+    };
+    addIfMissing(hasInfo, (k) => /^what is|^how /.test(normalizePhrase(k.keyword)));
+    addIfMissing(hasTxn, (k) => /platform|software/.test(normalizePhrase(k.keyword)));
+    addIfMissing(hasCmp, (k) => /vs|alternative/.test(normalizePhrase(k.keyword)));
+  }
 
   diversified.sort((a, b) => (b.opportunityScore - a.opportunityScore) || (b.priorityScore - a.priorityScore));
   return { keywords: diversified, duplicateRemoved, invalidFiltered };
@@ -749,12 +832,106 @@ function slugFromUrl(url: string): string {
   return p.split('/').filter(Boolean).join('-');
 }
 
-function defaultKeywordForPage(url: string, pType: PageType): string {
+function cleanTitleForH1(title: string): string {
+  let t = decodeBasicHtmlEntities(title).replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  t = t.replace(/\s*\|\s*.+$/i, '').trim();
+  t = t.replace(/\s*\|\s*Scadea\b.*$/i, '').trim();
+  if (t.length > 88) t = t.slice(0, 88).replace(/\s+\S*$/, '').trim();
+  return t;
+}
+
+function smartTitleCaseFromSlug(phrase: string): string {
+  const small = new Set(['a', 'an', 'and', 'at', 'for', 'in', 'of', 'on', 'or', 'the', 'to', 'with', 'vs', 'from', 'into', 'it', 'is']);
+  const words = phrase.split(/\s+/).filter(Boolean);
+  return words
+    .map((w, i) => {
+      const lw = w.toLowerCase();
+      if (lw === 'aiops') return 'AIOps';
+      if (lw === 'api') return 'API';
+      if (lw === 'aws') return 'AWS';
+      if (lw === 'gcp') return 'GCP';
+      if (lw === 'rpa') return 'RPA';
+      if (lw === 'bpm') return 'BPM';
+      if (lw === 'sql') return 'SQL';
+      if (lw === 'angular') return 'Angular';
+      if (i > 0 && small.has(lw)) return lw;
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(' ')
+    .trim();
+}
+
+function headlineFromUrlPath(url: string): string {
+  try {
+    const segments = new URL(url).pathname.split('/').filter(Boolean);
+    const last = segments.length ? segments[segments.length - 1] : '';
+    let raw = last;
+    try {
+      raw = decodeURIComponent(raw);
+    } catch {
+      /* keep raw */
+    }
+    const phrase = raw.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (phrase.length < 10 || /^\d+$/.test(phrase)) return '';
+    return smartTitleCaseFromSlug(phrase);
+  } catch {
+    return '';
+  }
+}
+
+function isGenericHeadingLabel(s: string): boolean {
+  const t = normalizePhrase(s);
+  if (t.length < 5) return true;
+  if (/^(blog|home|news|page|untitled|services)$/.test(t)) return true;
+  return false;
+}
+
+function topicLabelForSections(headline: string, maxWords = 6): string {
+  const cleaned = headline.replace(/\?+$/, '').trim();
+  const words = cleaned.split(/\s+/).filter(Boolean).slice(0, maxWords).join(' ');
+  return words || 'This topic';
+}
+
+function suggestedH1Dynamic(
+  primaryKeyword: string,
+  ctx: { url: string; pageTitle: string; suggestedTitle: string; currentH1: string; pType: PageType }
+): string {
+  const title = cleanTitleForH1(ctx.suggestedTitle || ctx.pageTitle);
+  const h1 = decodeBasicHtmlEntities(ctx.currentH1).replace(/\s+/g, ' ').trim();
+  const slugH = headlineFromUrlPath(ctx.url);
+  const hay = normalizePhrase([title, h1, slugH].join(' '));
+  const rel = countKeywordCoverage(hay, primaryKeyword);
+
+  if (!isGenericHeadingLabel(title) && title.length >= 18) {
+    return title.slice(0, 72).trim();
+  }
+  if (!isGenericHeadingLabel(h1) && h1.length >= 18) {
+    return h1.slice(0, 72).trim();
+  }
+  if (slugH.length >= 22) {
+    return slugH.slice(0, 72).trim();
+  }
+  if (rel >= 28) {
+    let fromKw = generateNaturalHeading(primaryKeyword);
+    fromKw = fromKw.replace(/\bBest What\b/gi, 'What');
+    return fromKw.slice(0, 72).trim();
+  }
+  if (slugH.length >= 12) {
+    return slugH.slice(0, 72).trim();
+  }
+  let fromKw = generateNaturalHeading(primaryKeyword);
+  fromKw = fromKw.replace(/\bBest What\b/gi, 'What');
+  return fromKw.slice(0, 72).trim();
+}
+
+function defaultKeywordForPage(url: string, pType: PageType, scanData: StoredScanReport): string {
+  const brand = domainBrandToken(scanData);
   const slug = slugFromUrl(url).replace(/-/g, ' ');
-  if (pType === 'homepage') return 'ai hiring platform for startups';
-  if (pType === 'blog') return `how to improve ${slug} with ai hiring workflows`;
-  if (pType === 'product') return `${slug} feature for recruitment automation`;
-  return `${slug} page optimization for recruitment platform`;
+  if (pType === 'homepage') return `${brand} homepage and services overview`.replace(/\s+/g, ' ').trim();
+  if (pType === 'blog') return `how to approach ${slug} with ${brand}`.replace(/\s+/g, ' ').trim();
+  if (pType === 'product') return `${slug} for ${brand} customers`.replace(/\s+/g, ' ').trim();
+  return `${brand} ${slug} key information`.replace(/\s+/g, ' ').trim();
 }
 
 function searchIntentType(intent: string): string {
@@ -916,7 +1093,7 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
   const reportsForMapping = reports.map((r) => ({ url: r.url, suggestedTitle: r.suggestedTitle, improvedContent: r.improvedContent }));
   const routedKeywords = finalKeywordQualityCheck(keywords).map((k) => ({
     ...k,
-    suggestedPageUrl: mapKeywordToPageAdvanced(k.keyword, reportsForMapping, crawlByUrl, k.suggestedPageUrl),
+    suggestedPageUrl: mapKeywordToPageAdvanced(k.keyword, reportsForMapping, crawlByUrl, scanData.domain),
     category: inferCategoryFromKeyword(k.keyword),
     searchIntent: inferIntentFromKeyword(k.keyword),
   }));
@@ -926,13 +1103,11 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
     const pType = pageType(rep.url);
     const crawl = crawlByUrl.get(rep.url);
     const picked =
-      routedKeywords.find((k) => k.suggestedPageUrl === rep.url && !used.has(k.keyword)) ||
-      routedKeywords.find((k) => !used.has(k.keyword)) ||
-      null;
+      routedKeywords.find((k) => k.suggestedPageUrl === rep.url && !used.has(k.keyword)) || null;
 
-    let primaryKeyword = picked?.keyword || defaultKeywordForPage(rep.url, pType);
+    let primaryKeyword = picked?.keyword || defaultKeywordForPage(rep.url, pType, scanData);
     if (used.has(primaryKeyword)) {
-      primaryKeyword = `${defaultKeywordForPage(rep.url, pType)} ${slugFromUrl(rep.url).replace(/-/g, ' ')}`.replace(/\s+/g, ' ').trim();
+      primaryKeyword = `${defaultKeywordForPage(rep.url, pType, scanData)} ${slugFromUrl(rep.url).replace(/-/g, ' ')}`.replace(/\s+/g, ' ').trim();
     }
     used.add(primaryKeyword);
 
@@ -955,13 +1130,21 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
     const pageText = [
       rep.suggestedTitle,
       rep.suggestedMetaDescription,
-      rep.improvedContent?.h1,
+      rep.improvedContent?.h1 ? sanitizeHeadingDisplay(rep.improvedContent.h1) : '',
       rep.improvedContent?.bodyCopy,
       crawl?.title,
       crawl?.metaDescription,
-      ...(crawl?.headings || []),
+      ...(crawl?.headings || []).map((h) => sanitizeHeadingDisplay(h)),
     ].join(' ');
-    const h1Text = rep.improvedContent?.h1 || crawl?.headings?.[0] || '';
+    const h1Text = sanitizeHeadingDisplay(rep.improvedContent?.h1 || crawl?.headings?.[0] || '');
+    const suggestedH1 = suggestedH1Dynamic(primaryKeyword, {
+      url: rep.url,
+      pageTitle: crawl?.title || '',
+      suggestedTitle: rep.suggestedTitle || '',
+      currentH1: h1Text,
+      pType,
+    });
+    const h2Topic = topicLabelForSections(suggestedH1, 4);
     const h2Count = crawl?.h2Count || Math.max(0, (crawl?.headings || []).filter((h) => /^h2[:\s-]/i.test(h)).length);
     const h3Count = Math.max(0, (crawl?.headings || []).filter((h) => /^h3[:\s-]/i.test(h)).length);
     const wordCount = crawl?.wordCount || (rep.improvedContent?.bodyCopy?.split(/\s+/).filter(Boolean).length || 0);
@@ -986,13 +1169,13 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
         suggestedImageType,
         issue: isAltMissing ? 'missing alt text' : isRelevantToContent ? 'none' : 'generic stock image',
         suggestion: {
-          altText: `${primaryKeyword} ${pType} illustration`.slice(0, 110),
-          filename: `${slugFromUrl(rep.url)}-${idx + 1}-${primaryKeyword.split(' ').slice(0, 2).join('-')}.webp`.replace(/[^a-z0-9.-]/gi, '-').toLowerCase(),
-          context: `Visual supporting ${primaryKeyword}`,
+          altText: `${h2Topic} — ${pType} visual`.slice(0, 110),
+          filename: `${slugFromUrl(rep.url)}-${idx + 1}-${h2Topic.split(' ').slice(0, 2).join('-')}`.replace(/[^a-z0-9.-]/gi, '-').toLowerCase() + '.webp',
+          context: `Visual supporting ${h2Topic}`,
         },
         improvement:
           isAltMissing || !isRelevantToContent
-            ? `Replace with ${suggestedImageType} image showing "${primaryKeyword}" context`
+            ? `Replace with ${suggestedImageType} image aligned to "${h2Topic}"`
             : 'Keep',
       };
     });
@@ -1059,19 +1242,23 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
       headingAnalysis: {
         currentH1: h1Text || 'Missing H1',
         isOptimized: h1Text.toLowerCase().includes(primaryKeyword.split(' ')[0] || ''),
-        suggestedH1: generateNaturalHeading(primaryKeyword),
-        h2Suggestions: [`Benefits of ${primaryKeyword}`, `${primaryKeyword} implementation steps`, `${primaryKeyword} pricing and ROI`],
-        h3Suggestions: ['Common setup mistakes', 'Integration checklist', 'Expected results timeline'],
+        suggestedH1,
+        h2Suggestions: [
+          `${h2Topic}: audience and intent`,
+          `${h2Topic}: solution snapshot`,
+          `${h2Topic}: proof points and examples`,
+        ],
+        h3Suggestions: ['Scope boundaries', 'Integration touchpoints', 'Timeline and ownership'],
       },
       imageAnalysis,
-      contentSuggestions: generateContentPlan(primaryKeyword, pType),
+      contentSuggestions: generateContentPlan(primaryKeyword, pType, suggestedH1),
     };
   });
 
   const primaryKeywords = routedKeywords.map((k) => ({
     keyword: k.keyword,
     intent: k.searchIntent,
-    targetPage: mapKeywordToPageAdvanced(k.keyword, reportsForMapping, crawlByUrl, k.suggestedPageUrl) || '/',
+    targetPage: mapKeywordToPageAdvanced(k.keyword, reportsForMapping, crawlByUrl, scanData.domain) || '/',
     priorityScore: Math.max(1, Math.min(100, Math.round(k.priorityScore * priorityWeight))),
     opportunityScore: Math.max(1, Math.min(100, Math.round(k.opportunityScore * opportunityWeight))),
   }));
