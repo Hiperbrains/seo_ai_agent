@@ -1,6 +1,6 @@
 import PDFDocument from 'pdfkit';
 import { PassThrough } from 'stream';
-import { getPublicAppUrl, resolveBrandLogoPath } from '../utils/brandAssets';
+import { getPublicAppUrl } from '../utils/brandAssets';
 import type {
   SeoPageReport,
 } from '../models/scan.model';
@@ -101,6 +101,22 @@ function softWrapForPdf(input: string): string {
     .replace(/([A-Za-z0-9]{45})(?=[A-Za-z0-9])/g, '$1 ');
 }
 
+/** Decode common HTML entities and normalize whitespace for PDF heading cells (avoids &#039; etc.). */
+function sanitizeHeadingForPdf(text: string): string {
+  return softWrapForPdf(
+    String(text || '')
+      .replace(/&#8217;|&#8216;|&#x2019;/gi, "'")
+      .replace(/&#8220;|&#8221;|&#x201c;|&#x201d;/gi, '"')
+      .replace(/&#038;|&amp;/gi, '&')
+      .replace(/&#039;|&#x27;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+}
+
 function displayUrl(url: string): string {
   if (url.length <= 110) return url;
   return `${url.slice(0, 72)} ... ${url.slice(-30)}`;
@@ -121,27 +137,36 @@ type PdfDoc = InstanceType<typeof PDFDocument>;
 
 function drawBrandedPdfHeader(doc: PdfDoc, title: string, subtitle: string): void {
   const marginTop = (doc as unknown as { page: { margins?: { top: number } } }).page.margins?.top ?? 48;
+  const m = (doc as unknown as { page: { margins: { left: number; right: number } } }).page.margins;
+  const ml = m?.left ?? 36;
+  const mr = m?.right ?? 36;
+  const textWidth = doc.page.width - ml - mr;
+  const brand = 'AI SEO AGENT';
+
+  doc.x = ml;
   doc.y = marginTop;
-  const logoPath = resolveBrandLogoPath();
-  const mid = doc.page.width / 2;
-  let y = doc.y;
-  if (logoPath) {
-    try {
-      const w = 118;
-      const x = mid - w / 2;
-      doc.image(logoPath, x, y, { width: w });
-      const appUrl = getPublicAppUrl();
-      if (appUrl) doc.link(x, y, w, 44, appUrl);
-      y += 48;
-    } catch {
-      /* optional asset */
-    }
+  const yBrand = doc.y;
+
+  doc.font('Helvetica-Bold').fontSize(15).fillColor('#0f172a');
+  doc.text(brand, ml, doc.y, { width: textWidth, align: 'center', lineGap: 0 });
+
+  const appUrl = getPublicAppUrl();
+  if (appUrl) {
+    const bw = doc.widthOfString(brand);
+    const bx = ml + (textWidth - bw) / 2;
+    doc.link(bx, yBrand, bw, 20, appUrl);
   }
-  doc.y = y;
-  doc.fontSize(20).fillColor('#0f172a').text(title, { align: 'center' });
-  doc.moveDown(0.4);
-  doc.fontSize(11).fillColor('#334155').text(subtitle, { align: 'center' });
-  doc.moveDown(0.8);
+
+  doc.x = ml;
+  doc.moveDown(0.25);
+  doc.font('Helvetica').fontSize(20).fillColor('#0f172a');
+  doc.text(title, ml, doc.y, { width: textWidth, align: 'center', lineGap: 2 });
+  doc.x = ml;
+  doc.moveDown(0.35);
+  doc.fontSize(11).fillColor('#334155');
+  doc.text(subtitle, ml, doc.y, { width: textWidth, align: 'center', lineGap: 0 });
+  doc.x = ml;
+  doc.moveDown(0.75);
 }
 
 function keywordQuickAction(rep: SeoPageReport): string {
@@ -422,22 +447,22 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
     }
     drawTable(
       [
-        { key: 'page', title: 'Page', width: 180 },
-        { key: 'wc', title: 'Words', width: 70, align: 'center' },
-        { key: 'rwc', title: 'Recommended', width: 90, align: 'center' },
-        { key: 'coverage', title: 'Coverage', width: 80, align: 'center' },
-        { key: 'h1', title: 'Current H1', width: 190 },
-        { key: 'h1opt', title: 'Optimized', width: 70, align: 'center' },
-        { key: 'suggested', title: 'Suggested H1', width: 130 + (contentWidth - 680) },
+        { key: 'page', title: 'Page', width: 160 },
+        { key: 'wc', title: 'Words', width: 64, align: 'center' },
+        { key: 'rwc', title: 'Recommended', width: 84, align: 'center' },
+        { key: 'coverage', title: 'Coverage', width: 72, align: 'center' },
+        { key: 'h1', title: 'Current H1', width: 200 },
+        { key: 'h1opt', title: 'Optimized', width: 64, align: 'center' },
+        { key: 'suggested', title: 'Suggested H1', width: 120 + (contentWidth - 764) },
       ],
       intelligenceReport.pages.map((p) => ({
         page: displayUrl(p.pageUrl),
         wc: p.contentAnalysis.wordCount,
         rwc: p.contentAnalysis.recommendedWordCount,
         coverage: `${p.contentAnalysis.keywordCoverage}%`,
-        h1: p.headingAnalysis.currentH1.slice(0, 68),
+        h1: sanitizeHeadingForPdf(p.headingAnalysis.currentH1),
         h1opt: p.headingAnalysis.isOptimized ? 'YES' : 'NO',
-        suggested: p.headingAnalysis.suggestedH1.slice(0, 64),
+        suggested: sanitizeHeadingForPdf(p.headingAnalysis.suggestedH1),
       })),
       { fontSize: 8 }
     );
@@ -586,21 +611,23 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
     sectionTitle('9. AI Decision Engine Output');
     drawTable(
       [
-        { key: 'action', title: 'Action', width: 100 },
-        { key: 'page', title: 'Page', width: 170 },
-        { key: 'priority', title: 'Priority', width: 80, align: 'center' },
-        { key: 'impactType', title: 'Impact Type', width: 90, align: 'center' },
-        { key: 'confidence', title: 'Confidence', width: 80, align: 'center' },
-        { key: 'reason', title: 'Reason', width: 140 },
-        { key: 'expected', title: 'Expected Impact', width: 120 + (contentWidth - 780) },
+        { key: 'action', title: 'Action', width: 88 },
+        { key: 'page', title: 'Page', width: 152 },
+        { key: 'primaryKeyword', title: 'Primary keyword', width: 128 },
+        { key: 'priority', title: 'Priority', width: 72, align: 'center' },
+        { key: 'impactType', title: 'Impact Type', width: 82, align: 'center' },
+        { key: 'confidence', title: 'Confidence', width: 72, align: 'center' },
+        { key: 'reason', title: 'Reason', width: 108 },
+        { key: 'expected', title: 'Expected Impact', width: 120 + (contentWidth - 804) },
       ],
       intelligenceReport.decisions.map((d) => ({
         action: d.actionType,
         page: displayUrl(d.page),
+        primaryKeyword: (d.primaryKeyword || '—').slice(0, 80),
         priority: d.priority,
         impactType: d.impactType,
         confidence: d.actionConfidence.score,
-        reason: d.reason.slice(0, 65),
+        reason: d.reason.slice(0, 55),
         expected: d.expectedImpact,
       })),
       { fontSize: 8 }
@@ -622,15 +649,29 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
     const skippedDecisions = intelligenceReport.decisions.filter((d) => d.actionConfidence.score <= 70 || d.priority === 'LOW');
     drawTable(
       [
-        { key: 'action', title: 'Skipped Action', width: 140 },
-        { key: 'page', title: 'Page', width: 180 },
-        { key: 'skipReason', title: 'Skip Reason', width: 260 },
-        { key: 'reason', title: 'Decision Reason', width: 180 },
-        { key: 'confidence', title: 'Confidence', width: 80, align: 'center' },
+        { key: 'action', title: 'Skipped Action', width: 120 },
+        { key: 'page', title: 'Page', width: 150 },
+        { key: 'primaryKeyword', title: 'Primary keyword', width: 110 },
+        { key: 'skipReason', title: 'Skip Reason', width: 200 },
+        { key: 'reason', title: 'Decision Reason', width: 150 },
+        { key: 'confidence', title: 'Confidence', width: 74, align: 'center' },
       ],
-      (skippedDecisions.length ? skippedDecisions : [{ actionType: '-', page: '-', reason: 'No skipped decisions', actionConfidence: { score: 0 } }]).map((d: any) => ({
+      (
+        skippedDecisions.length
+          ? skippedDecisions
+          : [
+              {
+                actionType: '-',
+                page: '-',
+                primaryKeyword: '—',
+                reason: 'No skipped decisions',
+                actionConfidence: { score: 0 },
+              },
+            ]
+      ).map((d: any) => ({
         action: d.actionType,
         page: displayUrl(d.page),
+        primaryKeyword: (d.primaryKeyword || '—').slice(0, 70),
         skipReason: d.actionConfidence.score <= 70 ? 'Low confidence (<=70)' : d.priority === 'LOW' ? 'Low priority' : '-',
         reason: d.reason.slice(0, 90),
         confidence: d.actionConfidence.score,
@@ -638,9 +679,28 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
       { fontSize: 8 }
     );
 
-    sectionTitle('10. Execution Plan (PR Ready)');
-    line(`Execution Mode: ${intelligenceReport.executionMode.toUpperCase()}`, '#0f172a', 10);
-    doc.moveDown(0.2);
+    sectionTitle('10. Execution plan (handoff to dev / content)');
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'This section is a draft work list. It does not change your live site. Engineers often ship similar edits as GitHub "pull requests" (PRs)—groups of file updates with a short description. Content and SEO leads should still read each "before → after" snippet for tone and accuracy.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        `Execution mode — ${intelligenceReport.executionMode.toUpperCase()}: ` +
+          (intelligenceReport.executionMode === 'preview'
+            ? 'Preview only. Nothing is auto-applied; use the tables below as tickets or copy-paste instructions.'
+            : 'Execute-capable build: automation may apply approved changes—confirm with your admin.')
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.45);
     const executionFiles = new Set(intelligenceReport.executionPlan.map((e) => e.filePath)).size;
     const executionChanges = intelligenceReport.executionPlan.reduce((n, e) => n + e.changes.length, 0);
     const blockedActionsCount = skippedDecisions.length;
@@ -648,7 +708,7 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
     const avgConfidence = intelligenceReport.executionPlan.length
       ? Math.round(
           intelligenceReport.executionPlan.reduce((n, e) => n + e.actionConfidence.score, 0) /
-            intelligenceReport.executionPlan.length
+            Math.max(1, intelligenceReport.executionPlan.length)
         )
       : 0;
     const prGroupCount =
@@ -657,28 +717,55 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
       intelligenceReport.prGroups.internalLinks.length +
       intelligenceReport.prGroups.technicalFixes.length;
     const readinessStatus = blockedActionsCount === 0 && avgConfidence >= 80 ? 'READY' : avgConfidence >= 70 ? 'REVIEW_REQUIRED' : 'NOT_READY';
+    const readinessPlain =
+      readinessStatus === 'READY'
+        ? 'Low friction: spot-check wording, then ship.'
+        : readinessStatus === 'REVIEW_REQUIRED'
+          ? 'Have SEO or a content owner approve each snippet before publishing.'
+          : 'Treat as exploratory—several items need stronger data or rewrites first.';
     drawTable(
       [
-        { key: 'metric', title: 'PR Readiness', width: 260 },
-        { key: 'value', title: 'Value', width: 440 },
+        { key: 'metric', title: 'What this means (managers)', width: 260 },
+        { key: 'value', title: 'Detail', width: 440 },
       ],
       [
-        { metric: 'Readiness Status', value: readinessStatus },
-        { metric: 'Safe Actions Count', value: safeActionsCount },
-        { metric: 'Blocked Actions Count', value: blockedActionsCount },
-        { metric: 'Average Confidence', value: avgConfidence },
+        {
+          metric: 'Publishing readiness (code)',
+          value: `${readinessStatus} — ${readinessPlain}`,
+        },
+        {
+          metric: 'Pages with an approved edit batch',
+          value: `${safeActionsCount} — each row is one URL where we suggest concrete title / meta / H1 (or similar) replacements below.`,
+        },
+        {
+          metric: 'Suggestions on hold for now',
+          value: `${blockedActionsCount} — ideas we still show in section 9 but did not bundle here (often lower confidence or lower priority).`,
+        },
+        {
+          metric: 'Average certainty for bundled edits (0–100)',
+          value: `${avgConfidence} — higher usually means clearer crawl signals and safer, smaller text swaps (not a Google ranking guarantee).`,
+        },
       ],
       { fontSize: 9 }
     );
     drawTable(
       [
-        { key: 'metric', title: 'Execution Summary', width: 260 },
-        { key: 'value', title: 'Value', width: 440 },
+        { key: 'metric', title: 'Scope of work', width: 260 },
+        { key: 'value', title: 'Detail', width: 440 },
       ],
       [
-        { metric: 'Total Changes', value: executionChanges },
-        { metric: 'Files Affected', value: executionFiles },
-        { metric: 'PR Groups Count', value: prGroupCount },
+        {
+          metric: 'Total on-page text or tag tweaks',
+          value: `${executionChanges} — individual before/after lines listed in the next table.`,
+        },
+        {
+          metric: 'Content files touched (approx.)',
+          value: `${executionFiles} — unique file paths referenced for engineering handoff.`,
+        },
+        {
+          metric: 'Suggested PR batches',
+          value: `${prGroupCount} — logical groupings (e.g. meta-only vs body) so reviews stay small.`,
+        },
       ],
       { fontSize: 9 }
     );
@@ -687,16 +774,63 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
     const riskRiskyBlocked = skippedDecisions.filter((d) => d.impactType === 'RISKY').length;
     drawTable(
       [
-        { key: 'metric', title: 'Risk Summary', width: 260 },
-        { key: 'value', title: 'Value', width: 440 },
+        { key: 'metric', title: 'Change type (for reviewers)', width: 260 },
+        { key: 'value', title: 'Detail', width: 440 },
       ],
       [
-        { metric: 'SEO_ONLY Count', value: riskSeoOnly },
-        { metric: 'CONTENT Count', value: riskContent },
-        { metric: 'RISKY Blocked Count', value: riskRiskyBlocked },
+        {
+          metric: 'Tags & snippets only (titles, meta, H1, …)',
+          value: `${riskSeoOnly} — typically quick copy review; less layout risk.`,
+        },
+        {
+          metric: 'Larger body or section rewrites',
+          value: `${riskContent} — needs editorial time if any appear.`,
+        },
+        {
+          metric: 'Blocked risky automation',
+          value: `${riskRiskyBlocked} — broad replacements we refused to auto-suggest.`,
+        },
       ],
       { fontSize: 9 }
     );
+    doc.moveDown(0.15);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'Suggested edits (for approvers): each row is one field on a page. Selector = which HTML element (e.g. title, H1). Before / After = current vs proposed text. SEO_ONLY means tag or snippet edits, not a full page redesign.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.25);
+    const topicRows = intelligenceReport.executionPlan.map((e) => ({
+      page: displayUrl(e.page),
+      fit: e.topicAlignmentScore,
+      note: softWrapForPdf(e.topicReviewerWarning || 'No major auto-detected mismatch vs URL/title/H1 (still verify tone).').slice(0, 200),
+    }));
+    drawTable(
+      [
+        { key: 'page', title: 'Page', width: 200 },
+        { key: 'fit', title: 'Topic fit 0–100', width: 90, align: 'center' },
+        { key: 'note', title: 'Topic check (auto)', width: 120 + (contentWidth - 410) },
+      ],
+      topicRows.length ? topicRows : [{ page: '—', fit: '—', note: 'No bundled edits for this export.' }],
+      { fontSize: 7 }
+    );
+    if (intelligenceReport.executionPlan.some((e) => e.topicReviewerWarning)) {
+      doc.moveDown(0.2);
+      doc.fontSize(8).fillColor('#b45309').text(
+        softWrapForPdf(
+          'At least one URL above shows weak overlap between the target keyword and the live page topic. Treat title/meta/H1/intro suggestions as draft ideas, not final copy.'
+        ),
+        leftX,
+        doc.y,
+        { width: contentWidth, align: 'left' }
+      );
+      doc.moveDown(0.35);
+    } else {
+      doc.moveDown(0.35);
+    }
     drawTable(
       [
         { key: 'page', title: 'Page', width: 130 },
@@ -895,6 +1029,57 @@ export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffe
       ],
       { fontSize: 9 }
     );
+
+    sectionTitle('13. Next steps, definitions, and automation');
+    doc.fontSize(9).fillColor('#334155').text('What runs automatically vs what you do manually', leftX, doc.y, {
+      width: contentWidth,
+      underline: true,
+    });
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'This PDF is generated by the SEO agent after a crawl and model pass. It does not edit your site by itself. Engineers may use GitHub or a CMS to apply rows from section 10; content owners should rewrite any draft that does not match brand voice or the true page topic. Integrations (e.g. GitHub issues or PR bots) only run when you enable them in your deployment.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.45);
+    doc.fontSize(9).fillColor('#334155').text('Suggested next steps', leftX, doc.y, {
+      width: contentWidth,
+      underline: true,
+    });
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        '1) Share sections 3–6 with the page owner for fact-checking. 2) Fix broken links and factual errors before SEO experiments. 3) For each URL in section 10 with a low "Topic fit" score, either change the primary keyword in your strategy or discard auto snippets. 4) Publish only after SME review of title, meta, H1, and intro. 5) Re-run a scan after changes to refresh scores.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.45);
+    doc.fontSize(9).fillColor('#334155').text('Definitions (plain language)', leftX, doc.y, {
+      width: contentWidth,
+      underline: true,
+    });
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'Score simulation: illustrative math from your scan averages—not a promise from Google. Topic fit: share of primary-keyword words found in the live URL slug, browser title, and H1. Confidence: how strong the crawl + keyword signals were for that bundle of edits. PR / pull request: a reviewable package of file changes—common in software teams.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.5);
+    doc.fontSize(8).fillColor('#94a3b8').text(
+      'Report layout is data-first for speed; richer charts and branding can be added in the web dashboard.',
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.6);
 
     doc.fontSize(8).fillColor('#94a3b8').text(`Generated ${new Date().toISOString()} — AI SEO Agent`, {
       align: 'center',

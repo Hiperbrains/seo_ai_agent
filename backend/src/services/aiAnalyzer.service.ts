@@ -1300,6 +1300,26 @@ function buildLocalPasteReadyFixes(
   if (issueTypes.includes('low_word_count')) {
     byType.set('low_word_count', improved.bodyCopy);
   }
+  if (issueTypes.includes('broken_links') && page.brokenLinks.length) {
+    const list = page.brokenLinks.slice(0, 15).join(' | ');
+    const more = page.brokenLinks.length > 15 ? ` (+${page.brokenLinks.length - 15} more)` : '';
+    byType.set('broken_links', `Targets: ${list}${more}`);
+  }
+  if (issueTypes.includes('invalid_or_nonfunctional_link') && (page.invalidNavLinks?.length || 0) > 0) {
+    const list = (page.invalidNavLinks || [])
+      .slice(0, 8)
+      .map((x) => `${x.href} (${x.reason})`)
+      .join(' | ');
+    byType.set('invalid_or_nonfunctional_link', list);
+  }
+  if (issueTypes.includes('images_without_alt') && page.imagesWithoutAlt > 0) {
+    const imgs = (page.images || []).filter((i) => !String(i.alt || '').trim()).slice(0, 5);
+    const list = imgs.map((i) => i.src.replace(/\s+/g, ' ').slice(0, 90)).join(' | ');
+    byType.set(
+      'images_without_alt',
+      list ? `Add alt for: ${list}` : `Add descriptive alt text to ${page.imagesWithoutAlt} image(s).`
+    );
+  }
 
   const pasteReadyFixes = issueTypes
     .filter((t) => byType.has(t))
@@ -1330,6 +1350,12 @@ ${JSON.stringify(
     headings: page.headings.slice(0, 5),
     h1Count: page.h1Count,
     wordCount: page.wordCount,
+    brokenLinks: page.brokenLinks.slice(0, 25),
+    invalidNavLinks: (page.invalidNavLinks || []).slice(0, 12),
+    imagesMissingAltPreview: (page.images || [])
+      .filter((i) => !String(i.alt || '').trim())
+      .slice(0, 8)
+      .map((i) => ({ src: i.src.slice(0, 160), alt: i.alt })),
     contentSnippet: (page.contentSnippet || '').slice(0, 650),
     issueTypes,
     duplicateTitle,
@@ -1349,6 +1375,9 @@ Requirements:
 - For duplicate_title or missing_title, provide only title text.
 - For missing_meta_description, provide only meta description text.
 - For low_word_count, provide one ready-to-paste paragraph.
+- If issueTypes includes broken_links: include one pasteReadyFixes row with issueType "broken_links" and improvedContent listing each broken target URL and the action (remove link, update href, or restore page).
+- If issueTypes includes invalid_or_nonfunctional_link: include pasteReadyFixes row(s) with concrete href + fix.
+- If issueTypes includes images_without_alt: include pasteReadyFixes with suggested alt text per preview image src (short phrases).
 
 Output schema:
 {
@@ -1447,6 +1476,54 @@ function computeSeoScore(page: CrawlPageResult, duplicateTitle: boolean): number
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
+const GENERIC_ISSUE_FIX = 'Fix this issue based on SEO best practices for this page.';
+
+/** When aggregate or per-page AI did not produce a paste-ready line, use crawl-backed specifics (where/when). */
+function buildDeterministicIssueFix(
+  type: string,
+  page: CrawlPageResult,
+  description: string,
+  perf?: PageSpeedMetrics
+): string {
+  switch (type) {
+    case 'broken_links': {
+      const targets = page.brokenLinks.filter(Boolean).slice(0, 12);
+      if (!targets.length) return '';
+      const more = page.brokenLinks.length > 12 ? ` (+${page.brokenLinks.length - 12} more)` : '';
+      return `Page ${page.url} — broken internal hrefs to fix or remove: ${targets.join(' | ')}${more}. Restore moved URLs, fix typos, or point to the current live path.`;
+    }
+    case 'invalid_or_nonfunctional_link': {
+      const inv = page.invalidNavLinks || [];
+      if (!inv.length) return description;
+      const lines = inv
+        .slice(0, 8)
+        .map((x) => `${x.href} (${x.reason})`)
+        .join(' | ');
+      return `Page ${page.url} — repair or remove non-working links: ${lines}. Replace placeholders with real destinations or remove from primary content.`;
+    }
+    case 'images_without_alt': {
+      const imgs = (page.images || []).filter((i) => !String(i.alt || '').trim()).slice(0, 6);
+      if (imgs.length) {
+        const srcs = imgs.map((i) => i.src.replace(/\s+/g, ' ').slice(0, 100)).join(' | ');
+        return `${page.imagesWithoutAlt} image(s) missing ALT on ${page.url}. First assets to update: ${srcs}. Write short, accurate alt text (subject + role), not keyword lists.`;
+      }
+      return `${page.imagesWithoutAlt} image(s) on ${page.url} need descriptive alt attributes for accessibility and image search.`;
+    }
+    case 'slow_page': {
+      const bits = [`crawl/load ~${page.loadTimeMs}ms`];
+      if (perf?.lcpMs) bits.push(`LCP ~${perf.lcpMs}ms`);
+      if (perf?.inpMs) bits.push(`INP ~${perf.inpMs}ms`);
+      return `Performance on ${page.url}: ${bits.join('; ')}. Prioritize LCP image, cut blocking JS, improve caching/TTFB, then re-test in PageSpeed or CrUX.`;
+    }
+    case 'missing_canonical': {
+      const clean = page.url.split('#')[0].split('?')[0];
+      return `Add one canonical in <head> for ${page.url}, e.g. <link rel="canonical" href="${clean}" /> (adjust if your preferred URL uses params or locale paths).`;
+    }
+    default:
+      return '';
+  }
+}
+
 function pushIssue(
   issues: AiIssueItem[],
   type: string,
@@ -1458,7 +1535,7 @@ function pushIssue(
     type,
     severity,
     description,
-    fix: aiFixes[type] || 'Fix this issue based on SEO best practices for this page.',
+    fix: aiFixes[type] || GENERIC_ISSUE_FIX,
   });
 }
 
@@ -1638,6 +1715,16 @@ export async function analyzePagesWithAiWithSignals(
       const issueSpecific = pageFixMap.get(issue.type);
       if (issueSpecific) issue.fix = issueSpecific;
     }
+    const forceDeterministic = new Set(['broken_links', 'invalid_or_nonfunctional_link', 'images_without_alt']);
+    for (const issue of issues) {
+      if (forceDeterministic.has(issue.type)) {
+        const det = buildDeterministicIssueFix(issue.type, p, issue.description, perf);
+        if (det) issue.fix = det;
+      } else if (!issue.fix || issue.fix.trim() === GENERIC_ISSUE_FIX || issue.fix.trim().length < 28) {
+        const det = buildDeterministicIssueFix(issue.type, p, issue.description, perf);
+        if (det) issue.fix = det;
+      }
+    }
 
     const seoScore = computeSeoScore(p, isDuplicateTitle);
     const keywordInsights = computeFreeKeywordInsights(p, seoScore, issueTypes);
@@ -1672,13 +1759,27 @@ export async function analyzePagesWithAiWithSignals(
       internalLinkSuggestions: aggregateAi.internalLinkingTips?.slice(0, 2) ?? [
         'Add contextual internal links from related pages using descriptive anchor text.',
       ],
-      pasteReadyFixes: issueTypes
-        .filter((t) => pageFixMap.has(t))
-        .map((t) => ({
-          issueType: t,
-          issueSummary: t.replace(/_/g, ' '),
-          improvedContent: pageFixMap.get(t) as string,
-        })),
+      pasteReadyFixes: (() => {
+        const m = new Map<string, string>();
+        for (const row of pageAi?.pasteReadyFixes ?? []) {
+          const t = String(row.issueType ?? '').trim();
+          const fix = String(row.improvedContent ?? '').trim();
+          if (t && fix) m.set(t, fix);
+        }
+        for (const row of localEnhanced.pasteReadyFixes) {
+          if (!m.has(row.issueType)) m.set(row.issueType, row.improvedContent);
+        }
+        for (const iss of issues) {
+          if (iss.fix && iss.fix.trim()) m.set(iss.type, iss.fix);
+        }
+        return [...m.entries()]
+          .filter(([, v]) => v && v.trim())
+          .map(([issueType, improvedContent]) => ({
+            issueType,
+            issueSummary: issueType.replace(/_/g, ' '),
+            improvedContent,
+          }));
+      })(),
       improvedContent: {
         h1: String(pageAi?.improvedContent?.h1 ?? localEnhanced.improvedContent.h1 ?? '').trim() || undefined,
         title: String(pageAi?.improvedContent?.title ?? localEnhanced.improvedContent.title ?? '').trim() || undefined,

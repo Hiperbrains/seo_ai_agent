@@ -118,6 +118,10 @@ export type IntelligenceReport = {
       faqSuggestions: string[];
       blogTopics: string[];
     };
+    /** Overlap of primaryKeyword with live slug + title + H1 (higher = safer topical fit). */
+    topicAlignmentScore: number;
+    /** When fit is weak, warn reviewers not to trust auto snippets blindly. */
+    topicReviewerWarning: string | null;
   }>;
   keywordStrategy: {
     primaryKeywords: Array<{
@@ -149,6 +153,8 @@ export type IntelligenceReport = {
   decisions: Array<{
     actionType: string;
     page: string;
+    /** Target query / primary keyword this action is optimizing for (answers "which keyword is missing in H1?"). */
+    primaryKeyword: string;
     priority: 'HIGH' | 'MEDIUM' | 'LOW';
     reason: string;
     expectedImpact: string;
@@ -156,15 +162,53 @@ export type IntelligenceReport = {
     actionConfidence: { score: number; reason: string };
   }>;
   decisionGroups: {
-    highImpact: Array<{ actionType: string; page: string; priority: 'HIGH' | 'MEDIUM' | 'LOW'; reason: string; expectedImpact: string; impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY'; actionConfidence: { score: number; reason: string } }>;
-    quickWins: Array<{ actionType: string; page: string; priority: 'HIGH' | 'MEDIUM' | 'LOW'; reason: string; expectedImpact: string; impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY'; actionConfidence: { score: number; reason: string } }>;
-    contentImprovements: Array<{ actionType: string; page: string; priority: 'HIGH' | 'MEDIUM' | 'LOW'; reason: string; expectedImpact: string; impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY'; actionConfidence: { score: number; reason: string } }>;
-    technicalFixes: Array<{ actionType: string; page: string; priority: 'HIGH' | 'MEDIUM' | 'LOW'; reason: string; expectedImpact: string; impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY'; actionConfidence: { score: number; reason: string } }>;
+    highImpact: Array<{
+      actionType: string;
+      page: string;
+      primaryKeyword: string;
+      priority: 'HIGH' | 'MEDIUM' | 'LOW';
+      reason: string;
+      expectedImpact: string;
+      impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY';
+      actionConfidence: { score: number; reason: string };
+    }>;
+    quickWins: Array<{
+      actionType: string;
+      page: string;
+      primaryKeyword: string;
+      priority: 'HIGH' | 'MEDIUM' | 'LOW';
+      reason: string;
+      expectedImpact: string;
+      impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY';
+      actionConfidence: { score: number; reason: string };
+    }>;
+    contentImprovements: Array<{
+      actionType: string;
+      page: string;
+      primaryKeyword: string;
+      priority: 'HIGH' | 'MEDIUM' | 'LOW';
+      reason: string;
+      expectedImpact: string;
+      impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY';
+      actionConfidence: { score: number; reason: string };
+    }>;
+    technicalFixes: Array<{
+      actionType: string;
+      page: string;
+      primaryKeyword: string;
+      priority: 'HIGH' | 'MEDIUM' | 'LOW';
+      reason: string;
+      expectedImpact: string;
+      impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY';
+      actionConfidence: { score: number; reason: string };
+    }>;
   };
   executionPlan: Array<{
     page: string;
     filePath: string;
     impactType: 'SEO_ONLY' | 'CONTENT' | 'UX' | 'RISKY';
+    topicAlignmentScore: number;
+    topicReviewerWarning: string | null;
     actionConfidence: { score: number; reason: string };
     executionAllowed: boolean;
     executionBlockReason?: string;
@@ -880,6 +924,19 @@ function headlineFromUrlPath(url: string): string {
   }
 }
 
+/** Meta description preview anchored on URL topic, not a fixed vertical (avoids wrong-industry boilerplate). */
+function metaDescriptionPreview(primaryKeyword: string, pageUrl: string): string {
+  const slugTopic = headlineFromUrlPath(pageUrl);
+  const kw = normalizeKeywordGrammar(primaryKeyword).slice(0, 52).trim();
+  if (slugTopic.length >= 14) {
+    return `Explore ${slugTopic}: practical context, key takeaways, and where "${kw}" belongs when it truly matches reader intent.`.slice(
+      0,
+      155
+    );
+  }
+  return `Practical summary for this page and how "${kw}" may relate—verify fit with your real product story before publishing.`.slice(0, 155);
+}
+
 function isGenericHeadingLabel(s: string): boolean {
   const t = normalizePhrase(s);
   if (t.length < 5) return true;
@@ -1150,6 +1207,14 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
     const wordCount = crawl?.wordCount || (rep.improvedContent?.bodyCopy?.split(/\s+/).filter(Boolean).length || 0);
     const keywordCoverage = countKeywordCoverage(pageText, primaryKeyword);
     const readability = estimateReadability(wordCount, h2Count, h3Count);
+    const topicAlignmentHay = normalizePhrase([slugFromUrl(rep.url).replace(/-/g, ' '), crawl?.title || '', h1Text].join(' '));
+    const topicAlignmentScore = countKeywordCoverage(topicAlignmentHay, primaryKeyword);
+    const topicReviewerWarning =
+      topicAlignmentScore < 26
+        ? 'Primary keyword may not match this page topic (URL/title/H1 vs target keyword). Treat generated title, meta, H1, and intro as draft; align with the real page purpose before publishing.'
+        : topicAlignmentScore < 40
+          ? 'Moderate overlap between target keyword and visible page topic—review snippets before publishing.'
+          : null;
     let imageAnalysis = (crawl?.images || []).slice(0, 8).map((img, idx) => {
       const altText = String(img.alt || '').trim();
       const isAltMissing = !altText;
@@ -1252,6 +1317,8 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
       },
       imageAnalysis,
       contentSuggestions: generateContentPlan(primaryKeyword, pType, suggestedH1),
+      topicAlignmentScore,
+      topicReviewerWarning,
     };
   });
 
@@ -1370,8 +1437,11 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
     ...pages.slice(0, 6).map((p) => ({
       actionType: p.headingAnalysis.isOptimized ? 'ADD_CONTENT' : 'UPDATE_H1',
       page: p.pageUrl,
+      primaryKeyword: p.primaryKeyword,
       priority: level(p.opportunityScore),
-      reason: p.headingAnalysis.isOptimized ? 'Content depth below opportunity potential' : 'Primary keyword missing in H1',
+      reason: p.headingAnalysis.isOptimized
+        ? 'Content depth below opportunity potential'
+        : 'Primary keyword missing or weak in H1',
       expectedImpact: `+${Math.max(3, Math.round(p.opportunityScore / 20))} score impact`,
       impactType: impactTypeFromAction(p.headingAnalysis.isOptimized ? 'ADD_CONTENT' : 'UPDATE_H1'),
       actionConfidence: {
@@ -1382,6 +1452,7 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
     ...newPageSuggestions.slice(0, 2).map((n) => ({
       actionType: 'CREATE_PAGE',
       page: n.url,
+      primaryKeyword: n.keyword,
       priority: n.priority,
       reason: n.reason,
       expectedImpact: '+8 to +15 long-tail visibility',
@@ -1404,6 +1475,7 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
     .slice(0, maxActions);
 
   const rawExecutionPlan = executionCandidates.map((p) => {
+    const metaAfter = metaDescriptionPreview(p.primaryKeyword, p.pageUrl);
     const changes = [
       {
         selector: 'title',
@@ -1431,10 +1503,10 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
         selector: 'meta[name="description"]',
         action: 'REPLACE_TEXT',
         current: 'Current description',
-        suggested: `Learn how ${p.primaryKeyword} improves hiring outcomes with measurable impact.`.slice(0, 155),
+        suggested: metaAfter,
         diffPreview: {
           before: 'Current description',
-          after: `Learn how ${p.primaryKeyword} improves hiring outcomes with measurable impact.`.slice(0, 155),
+          after: metaAfter,
           diffType: 'replace' as const,
         },
       },
@@ -1451,20 +1523,44 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
       },
     ];
     const hasRiskyChange = changes.some((c) => isRiskyExecutionChange(c.selector, c.action, c.suggested));
-    const actionConfidenceScore = Math.max(0, Math.min(100, Math.round((p.priorityScore * 0.45) + (p.opportunityScore * 0.45) + (hasRiskyChange ? -30 : 10))));
-    const executionAllowed = actionConfidenceScore > 70 && !hasRiskyChange;
+    const topicPenalty = p.topicAlignmentScore < 26 ? 20 : p.topicAlignmentScore < 36 ? 10 : 0;
+    const topicNote =
+      p.topicAlignmentScore < 26
+        ? ' Topic fit vs live page is weak—human review required.'
+        : p.topicAlignmentScore < 40
+          ? ' Moderate topic fit—verify copy before publishing.'
+          : '';
+    const topicBlock = p.topicAlignmentScore < 18;
+    let actionConfidenceScore = Math.max(
+      0,
+      Math.min(100, Math.round((p.priorityScore * 0.45) + (p.opportunityScore * 0.45) + (hasRiskyChange ? -30 : 10) - topicPenalty))
+    );
+    const executionAllowed = !topicBlock && actionConfidenceScore > 70 && !hasRiskyChange;
+    const executionBlockReason = topicBlock
+      ? 'Primary keyword looks unrelated to this page topic (auto-check vs URL/title/H1). Fix keyword mapping first.'
+      : executionAllowed
+        ? undefined
+        : actionConfidenceScore <= 70
+          ? 'Confidence score <= 70'
+          : 'Risky operation detected';
     return {
       page: p.pageUrl,
       filePath: `content/${slugFromUrl(p.pageUrl)}.html`,
-      impactType: hasRiskyChange ? 'RISKY' as const : 'SEO_ONLY' as const,
+      impactType: hasRiskyChange ? ('RISKY' as const) : ('SEO_ONLY' as const),
+      topicAlignmentScore: p.topicAlignmentScore,
+      topicReviewerWarning: p.topicReviewerWarning,
       actionConfidence: {
         score: actionConfidenceScore,
-        reason: hasRiskyChange
-          ? 'Blocked due to risky broad replacement pattern.'
-          : 'Safe targeted selectors with high opportunity-confidence score.',
+        reason: (() => {
+          if (hasRiskyChange) return 'Blocked due to risky broad replacement pattern.';
+          if (topicBlock) return 'Blocked: primary keyword appears unrelated to visible page topic (URL/title/H1).';
+          let r = 'Safe targeted selectors with opportunity-confidence score.';
+          if (topicNote.trim()) r += topicNote;
+          return r;
+        })(),
       },
       executionAllowed,
-      executionBlockReason: executionAllowed ? undefined : actionConfidenceScore <= 70 ? 'Confidence score <= 70' : 'Risky operation detected',
+      executionBlockReason,
       changes,
     };
   });
@@ -1476,6 +1572,8 @@ export function buildIntelligenceReport(scanData: StoredScanReport): Intelligenc
       page: pages[0].pageUrl,
       filePath: `content/${slugFromUrl(pages[0].pageUrl)}.html`,
       impactType: 'SEO_ONLY',
+      topicAlignmentScore: pages[0].topicAlignmentScore,
+      topicReviewerWarning: pages[0].topicReviewerWarning,
       actionConfidence: { score: 78, reason: 'Fallback H1-only change is constrained and safe.' },
       executionAllowed: true,
       executionBlockReason: undefined,
