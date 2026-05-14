@@ -5,6 +5,7 @@ import path from 'path';
 import { config } from './config/config';
 import { getDb } from './services/db.service';
 import { scanRouter } from './routes/scan.routes';
+import { startDataRetentionScheduler } from './services/dataRetention.service';
 import { startScheduler } from './services/scheduler.service';
 import { logger } from './utils/logger';
 
@@ -37,5 +38,6 @@ getDb();
 
 app.listen(config.port, () => {
   logger.info(`SEO Agent API listening on port ${config.port}`);
+  startDataRetentionScheduler();
   startScheduler();
 });

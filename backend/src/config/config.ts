@@ -47,4 +47,8 @@ export const config = {
   pageSpeedStrategy: (process.env.PAGESPEED_STRATEGY || 'mobile').toLowerCase() === 'desktop' ? 'desktop' : 'mobile',
   pageSpeedTimeoutMs: Math.max(5000, num(process.env.PAGESPEED_TIMEOUT_MS, 15000)),
   dbPath: process.env.DB_PATH || path.join(process.cwd(), 'data', 'seo-agent.db'),
+  /** Keep scans/issues/reports/activity newer than this many days; `0` disables automatic purge. */
+  dataRetentionDays: num(process.env.DATA_RETENTION_DAYS, 7),
+  /** When to run retention purge (cron). Default 03:00 UTC daily. */
+  dataRetentionCron: process.env.DATA_RETENTION_CRON || '0 3 * * *',
 };

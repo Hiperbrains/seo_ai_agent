@@ -70,3 +70,14 @@ export function loadScanReportFile(scanId: number): StoredScanReport | null {
     return null;
   }
 }
+
+export function deleteScanReportFile(scanId: number): boolean {
+  const p = path.join(reportsDir(), `${scanId}.json`);
+  if (!fs.existsSync(p)) return false;
+  try {
+    fs.unlinkSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}

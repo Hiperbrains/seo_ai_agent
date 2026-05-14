@@ -2,8 +2,9 @@
 # Single Node base so native modules (better-sqlite3) match runtime.
 FROM node:20-bookworm-slim AS builder
 
-RUN apt-get update && apt-get install -y python3 make g++ sqlite3 libsqlite3-dev \
-  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  python3 make g++ sqlite3 libsqlite3-dev \
+  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/*
 
 WORKDIR /build
 
@@ -25,10 +26,10 @@ RUN cd frontend/angular-dashboard && npx ng build --configuration production
 
 FROM node:20-bookworm-slim
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
   libnss3 libatk1.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
   libxfixes3 libxrandr2 libgbm1 libasound2 libglib2.0-0 \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/*
 
 WORKDIR /app
 
