@@ -46,10 +46,17 @@ function pick(obj, ...keys) {
 (async () => {
   const raw = await get(configUrl);
   const data = JSON.parse(raw);
-  const conn = data.ConnectionStrings || data.connectionStrings || {};
+  const merged = { ...(data.ConnectionStrings || data.connectionStrings || {}) };
+  if (Array.isArray(data.propertySources)) {
+    for (const ps of data.propertySources) {
+      const src = ps.source || {};
+      if (src['ConnectionStrings:Hiperbrains']) merged.Hiperbrains = src['ConnectionStrings:Hiperbrains'];
+      if (src.HIPERBRAINS_DATABASE) merged.Hiperbrains = src.HIPERBRAINS_DATABASE;
+    }
+  }
   const lines = [];
 
-  const hiperbrains = pick(conn, 'Hiperbrains', 'hiperbrains') || pick(data, 'HIPERBRAINS_DATABASE');
+  const hiperbrains = pick(merged, 'Hiperbrains', 'hiperbrains') || pick(data, 'HIPERBRAINS_DATABASE');
   if (hiperbrains) lines.push(`HIPERBRAINS_DATABASE=${hiperbrains}`);
 
   const dbUrl = pick(data, 'DATABASE_URL', 'databaseUrl');

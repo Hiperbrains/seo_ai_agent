@@ -42,7 +42,8 @@ function applyRemoteJson(data: JsonRecord): void {
   const conn = (data.ConnectionStrings || data.connectionStrings) as JsonRecord | undefined;
   const hiperbrains =
     pickString(conn, 'Hiperbrains', 'hiperbrains') ||
-    pickString(data, 'HIPERBRAINS_DATABASE', 'DATABASE_CONNECTION_STRING');
+    pickString(data, 'HIPERBRAINS_DATABASE', 'DATABASE_CONNECTION_STRING') ||
+    pickString(data, 'ConnectionStrings:Hiperbrains');
 
   applyEnv('HIPERBRAINS_DATABASE', hiperbrains);
   applyEnv('DATABASE_URL', pickString(data, 'DATABASE_URL', 'databaseUrl'));

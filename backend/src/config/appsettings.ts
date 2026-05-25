@@ -1,11 +1,17 @@
 import fs from 'fs';
 import path from 'path';
 
+export interface ConnectionStrings {
+  Hiperbrains?: string;
+  ConnectionStringRoomService?: string;
+}
+
 export interface AppSettingsFile {
   OpenAI?: { ApiKey?: string };
   Google?: { ApiKey?: string };
   OPENAI_API_KEY?: string;
   GOOGLE_API_KEY?: string;
+  ConnectionStrings?: ConnectionStrings;
 }
 
 const APPSETTINGS_CANDIDATES = [
@@ -29,17 +35,16 @@ function readAppSettingsFile(): AppSettingsFile {
 }
 
 /** OpenAI + Google keys — always from appsettings.json (never company_configs DB). */
-export function loadAppSettings(): { openaiApiKey: string; googleApiKey: string } {
+export function loadAppSettings(): {
+  openaiApiKey: string;
+  googleApiKey: string;
+  hiperbrainsDatabase: string;
+  connectionStringRoomService: string;
+} {
   const file = readAppSettingsFile();
-  const openaiApiKey = (
-    file.OpenAI?.ApiKey ||
-    file.OPENAI_API_KEY ||
-    ''
-  ).trim();
-  const googleApiKey = (
-    file.Google?.ApiKey ||
-    file.GOOGLE_API_KEY ||
-    ''
-  ).trim();
-  return { openaiApiKey, googleApiKey };
+  const openaiApiKey = (file.OpenAI?.ApiKey || file.OPENAI_API_KEY || '').trim();
+  const googleApiKey = (file.Google?.ApiKey || file.GOOGLE_API_KEY || '').trim();
+  const hiperbrainsDatabase = (file.ConnectionStrings?.Hiperbrains || '').trim();
+  const connectionStringRoomService = (file.ConnectionStrings?.ConnectionStringRoomService || '').trim();
+  return { openaiApiKey, googleApiKey, hiperbrainsDatabase, connectionStringRoomService };
 }

@@ -42,9 +42,12 @@ function parseDotNetPgConnectionString(raw: string): string {
   return `postgresql://${encUser}:${encPass}@${host}:${port}/${database}`;
 }
 
-function resolveDatabaseUrl(): string {
+function resolveDatabaseUrl(appSettings: ReturnType<typeof loadAppSettings>): string {
   if (process.env.DATABASE_URL?.trim()) return process.env.DATABASE_URL.trim();
-  const hiperbrains = process.env.HIPERBRAINS_DATABASE?.trim() || process.env.DATABASE_CONNECTION_STRING?.trim();
+  const hiperbrains =
+    process.env.HIPERBRAINS_DATABASE?.trim() ||
+    process.env.DATABASE_CONNECTION_STRING?.trim() ||
+    appSettings.hiperbrainsDatabase;
   if (hiperbrains) return parseDotNetPgConnectionString(hiperbrains);
   return '';
 }
@@ -84,7 +87,7 @@ export const config = {
   pageSpeedTimeoutMs: Math.max(5000, num(process.env.PAGESPEED_TIMEOUT_MS, 15000)),
   dbPath: process.env.DB_PATH || path.join(process.cwd(), 'data', 'seo-agent.db'),
   /** PostgreSQL connection string — enables multi-tenant auth + company-scoped data (public schema). */
-  databaseUrl: resolveDatabaseUrl(),
+  databaseUrl: resolveDatabaseUrl(appSettings),
   jwtSecret: process.env.JWT_SECRET || 'change-me-in-production-seo-agent',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   /** Keep scans/issues/reports/activity newer than this many days; `0` disables automatic purge. */

@@ -42,8 +42,9 @@ COPY --from=builder /build/backend/node_modules ./node_modules
 COPY --from=builder /build/backend/dist ./dist
 COPY --from=builder /build/backend/assets ./assets
 COPY --from=builder /build/frontend/angular-dashboard/dist ./frontend/angular-dashboard/dist
-# OpenAI + Google keys (mount or bake at deploy; not in DB)
+# API keys + ConnectionStrings (appsettings.json from deploy runner; not in git)
 COPY appsettings.example.json ./appsettings.example.json
+COPY appsettings.json ./appsettings.json
 
 RUN mkdir -p /app/data
 

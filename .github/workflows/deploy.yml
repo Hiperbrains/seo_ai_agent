@@ -102,6 +102,16 @@ jobs:
           echo "Env       : $ENV"
           echo "====================================="
 
+          if [ ! -f appsettings.json ]; then
+            if [ -n "${{ secrets.APPSETTINGS_JSON }}" ]; then
+              printf '%s\n' '${{ secrets.APPSETTINGS_JSON }}' > appsettings.json
+              echo "Wrote appsettings.json from APPSETTINGS_JSON secret"
+            else
+              echo "ERROR: appsettings.json missing. Copy it to the runner repo root or set APPSETTINGS_JSON secret."
+              exit 1
+            fi
+          fi
+
           echo "Building image..."
           docker build --no-cache -t "$IMAGE_TAG" .
 
