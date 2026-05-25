@@ -25,6 +25,7 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.ACCESSKEYID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SECRETKEY }}
       AWS_DEFAULT_REGION: us-east-2
+      APPSETTINGS_JSON: ${{ secrets.APPSETTINGS_JSON }}
 
     runs-on:
       - self-hosted
@@ -103,8 +104,8 @@ jobs:
           echo "====================================="
 
           if [ ! -f appsettings.json ]; then
-            if [ -n "${{ secrets.APPSETTINGS_JSON }}" ]; then
-              printf '%s\n' '${{ secrets.APPSETTINGS_JSON }}' > appsettings.json
+            if [ -n "$APPSETTINGS_JSON" ]; then
+              printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
               echo "Wrote appsettings.json from APPSETTINGS_JSON secret"
             else
               echo "ERROR: appsettings.json missing. Copy it to the runner repo root or set APPSETTINGS_JSON secret."
