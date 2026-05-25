@@ -19,23 +19,37 @@ function applyEnv(key: string, value: string): void {
 }
 
 function writeAppSettings(data: JsonRecord): void {
-  const openAi = pickString(
-    data.OpenAI as JsonRecord | undefined,
-    'ApiKey'
-  ) || pickString(data, 'OPENAI_API_KEY');
-  const google = pickString(
-    data.Google as JsonRecord | undefined,
-    'ApiKey'
-  ) || pickString(data, 'GOOGLE_API_KEY');
-  if (!openAi && !google) return;
+  const openAi =
+    pickString(data.OpenAI as JsonRecord | undefined, 'ApiKey') || pickString(data, 'OPENAI_API_KEY');
+  const google =
+    pickString(data.Google as JsonRecord | undefined, 'ApiKey') || pickString(data, 'GOOGLE_API_KEY');
+  const connRemote = (data.ConnectionStrings || data.connectionStrings) as JsonRecord | undefined;
+  const hiperbrains =
+    pickString(connRemote, 'Hiperbrains', 'hiperbrains') || pickString(data, 'HIPERBRAINS_DATABASE');
+
+  const target = path.resolve(process.cwd(), 'appsettings.json');
+  let existing: JsonRecord = {};
+  if (fs.existsSync(target)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(target, 'utf8')) as JsonRecord;
+    } catch {
+      existing = {};
+    }
+  }
+  const existingConn = (existing.ConnectionStrings || {}) as JsonRecord;
+  if (!openAi && !google && !hiperbrains) return;
 
   const file = {
-    OpenAI: { ApiKey: openAi },
-    Google: { ApiKey: google },
+    ...existing,
+    OpenAI: { ApiKey: openAi || pickString(existing.OpenAI as JsonRecord | undefined, 'ApiKey') },
+    Google: { ApiKey: google || pickString(existing.Google as JsonRecord | undefined, 'ApiKey') },
+    ConnectionStrings: {
+      ...existingConn,
+      ...(hiperbrains ? { Hiperbrains: hiperbrains } : {}),
+    },
   };
-  const target = path.resolve(process.cwd(), 'appsettings.json');
   fs.writeFileSync(target, `${JSON.stringify(file, null, 2)}\n`, 'utf8');
-  logger.info('Wrote appsettings.json from remote config');
+  logger.info('Merged appsettings.json from remote config');
 }
 
 function applyRemoteJson(data: JsonRecord): void {

@@ -128,56 +128,95 @@ jobs:
           fi
           echo "appsettings.json OK ($(wc -c < appsettings.json) bytes)"
 
-          echo "Building image (appsettings baked into image, no runtime mount)..."
+          echo "Building image (appsettings baked into image)..."
           docker build --no-cache -t "$IMAGE_TAG" .
-
-          echo "Stopping existing container..."
-          docker stop "$CONTAINER_NAME" 2>/dev/null || true
-          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-          docker stop SEOAgent 2>/dev/null || true
-          docker rm -f SEOAgent 2>/dev/null || true
 
           echo "Creating volume..."
           docker volume create "hiperbrains-${ENV}-data" || true
 
           echo "Creating .env file..."
-          cat > .env <<EOF
-          NODE_ENV=production
-          PORT=8080
-          DB_PATH=/app/data/app.db
-          EOF
+          cat > .env <<'EOF'
+NODE_ENV=production
+PORT=8080
+DB_PATH=/app/data/app.db
+EOF
+
+          node scripts/merge-appsettings-into-env.js appsettings.json .env
 
           echo "Loading database settings from config server..."
           if [ -z "$CONFIG_URL" ]; then
-            echo "WARN: CONFIG_URL empty — set CONFIG_SERVER_DEV (or APP) GitHub secret"
+            echo "WARN: CONFIG_URL empty — set CONFIG_SERVER_DEV secret or APPSETTINGS_JSON ConnectionStrings"
           else
             export CONFIG_URL="$CONFIG_URL"
             node scripts/append-config-to-env.js .env || echo "WARN: config server fetch failed"
+            node scripts/merge-appsettings-into-env.js appsettings.json .env
           fi
+
           if grep -qE '^HIPERBRAINS_DATABASE=|^DATABASE_URL=' .env 2>/dev/null; then
             echo "PostgreSQL env configured (multi-tenant / login enabled)"
           else
-            echo "WARN: No HIPERBRAINS_DATABASE in .env — check APPSETTINGS_JSON ConnectionStrings or CONFIG_SERVER_*"
+            echo "WARN: No HIPERBRAINS_DATABASE in .env — /api/auth/mode will be multiTenant:false"
           fi
 
-          echo "Starting new container..."
+          NEXT_NAME="${CONTAINER_NAME}-next"
+          PROBE_PORT=$((PORT + 100))
+
+          docker rm -f "$NEXT_NAME" 2>/dev/null || true
+          echo "Starting probe container on 127.0.0.1:${PROBE_PORT}..."
+          docker run -d \
+            --name "$NEXT_NAME" \
+            -p "127.0.0.1:${PROBE_PORT}:8080" \
+            --env-file .env \
+            -e ConfigUrl="$CONFIG_URL" \
+            -v "hiperbrains-${ENV}-data:/app/data" \
+            --log-driver=json-file \
+            "$IMAGE_TAG"
+
+          echo "Waiting for /health..."
+          healthy=0
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:${PROBE_PORT}/health" >/dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "ERROR: New container failed health check"
+            docker logs "$NEXT_NAME" --tail 80 || true
+            docker rm -f "$NEXT_NAME" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Health check passed"
+          docker rm -f "$NEXT_NAME" 2>/dev/null || true
+
+          echo "Stopping old containers..."
+          docker stop "$CONTAINER_NAME" 2>/dev/null || true
+          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+          docker stop SEOAgent 2>/dev/null || true
+          docker rm -f SEOAgent 2>/dev/null || true
+
+          echo "Starting production container on port ${PORT}..."
           docker run -d \
             --name "$CONTAINER_NAME" \
-            -p "${PORT}:8080" \
+            -p "0.0.0.0:${PORT}:8080" \
             --env-file .env \
             -e ConfigUrl="$CONFIG_URL" \
             -v "hiperbrains-${ENV}-data:/app/data" \
             --restart unless-stopped \
-            --log-driver=awslogs \
-            --log-opt awslogs-region=us-east-2 \
-            --log-opt awslogs-group=hiperbrains-api \
-            --log-opt awslogs-create-group=true \
-            --log-opt awslogs-stream="$CONTAINER_NAME" \
+            --log-driver=json-file \
             "$IMAGE_TAG"
+
+          sleep 3
+          if ! curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+            echo "ERROR: Production container not healthy on port ${PORT}"
+            docker logs "$CONTAINER_NAME" --tail 80 || true
+            exit 1
+          fi
 
           echo "Cleaning unused images..."
           docker image prune -f
 
           echo "====================================="
-          echo "Deploy complete: $CONTAINER_NAME on port $PORT"
+          echo "Deploy complete: http://127.0.0.1:${PORT}/health OK"
           echo "====================================="

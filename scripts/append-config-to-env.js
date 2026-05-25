@@ -74,12 +74,31 @@ function pick(obj, ...keys) {
 
   const openAi = pick(data.OpenAI, 'ApiKey') || pick(data, 'OPENAI_API_KEY');
   const google = pick(data.Google, 'ApiKey') || pick(data, 'GOOGLE_API_KEY');
-  if (openAi || google) {
-    fs.writeFileSync(
-      'appsettings.json',
-      JSON.stringify({ OpenAI: { ApiKey: openAi || '' }, Google: { ApiKey: google || '' } }, null, 2)
-    );
-    console.log('Wrote appsettings.json from config server');
+  let existing = {};
+  if (fs.existsSync('appsettings.json') && fs.statSync('appsettings.json').isFile()) {
+    try {
+      existing = JSON.parse(fs.readFileSync('appsettings.json', 'utf8'));
+    } catch {
+      existing = {};
+    }
+  }
+  const conn = { ...(existing.ConnectionStrings || {}), ...merged };
+  if (hiperbrains) conn.Hiperbrains = hiperbrains;
+  const next = {
+    ...existing,
+    OpenAI: { ApiKey: openAi || existing.OpenAI?.ApiKey || '' },
+    Google: { ApiKey: google || existing.Google?.ApiKey || '' },
+    ConnectionStrings: conn,
+  };
+  if (openAi || google || hiperbrains || dbUrl) {
+    fs.writeFileSync('appsettings.json', `${JSON.stringify(next, null, 2)}\n`);
+    console.log('Merged appsettings.json from config server');
+  }
+
+  if (fs.existsSync('.env')) {
+    require('child_process').execSync('node scripts/merge-appsettings-into-env.js appsettings.json .env', {
+      stdio: 'inherit',
+    });
   }
 })().catch((e) => {
   console.error('Config fetch failed:', e.message);
