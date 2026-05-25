@@ -30,22 +30,32 @@ export async function initDb(): Promise<void> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     if (config.databaseUrl) {
-      driver = 'postgres';
-      pgPool = new Pool({
-        connectionString: config.databaseUrl,
-        connectionTimeoutMillis: 15_000,
-        idleTimeoutMillis: 30_000,
-      });
-      await migratePostgres();
-      logger.info('Database: PostgreSQL (multi-tenant)');
-    } else {
-      driver = 'sqlite';
-      ensureDataDir();
-      sqliteDb = new Database(config.dbPath);
-      sqliteDb.pragma('journal_mode = WAL');
-      migrateSqlite();
-      logger.info('Database: SQLite (single-tenant legacy)');
+      try {
+        driver = 'postgres';
+        pgPool = new Pool({
+          connectionString: config.databaseUrl,
+          connectionTimeoutMillis: 15_000,
+          idleTimeoutMillis: 30_000,
+        });
+        await migratePostgres();
+        logger.info('Database: PostgreSQL (multi-tenant)');
+        return;
+      } catch (err) {
+        logger.warn('PostgreSQL init failed; falling back to SQLite', {
+          error: String(err instanceof Error ? err.message : err),
+        });
+        if (pgPool) {
+          await pgPool.end().catch(() => undefined);
+          pgPool = null;
+        }
+        driver = 'sqlite';
+      }
     }
+    ensureDataDir();
+    sqliteDb = new Database(config.dbPath);
+    sqliteDb.pragma('journal_mode = WAL');
+    migrateSqlite();
+    logger.info('Database: SQLite (single-tenant legacy)');
   })();
   return initPromise;
 }

@@ -246,11 +246,20 @@ jobs:
             return 1
           }
 
+          free_port() {
+            local p="$1"
+            for cid in $(docker ps -q --filter "publish=${p}" 2>/dev/null); do
+              echo "Removing container ${cid} bound to port ${p}"
+              docker rm -f "$cid" 2>/dev/null || true
+            done
+          }
+
           echo "Stopping old containers..."
           docker stop "$CONTAINER_NAME" 2>/dev/null || true
           docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
           docker stop SEOAgent 2>/dev/null || true
           docker rm -f SEOAgent 2>/dev/null || true
+          free_port "$PORT"
 
           echo "Starting production container on port ${PORT}..."
           docker run -d \
@@ -275,6 +284,65 @@ jobs:
             echo "ERROR: Production container not healthy on port ${PORT}"
             docker logs "$CONTAINER_NAME" --tail 80 || true
             rollback_previous || true
+          fi
+
+          ensure_port_up() {
+            if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+              return 0
+            fi
+            echo "WARN: Port ${PORT} not healthy — emergency start attempts..."
+            free_port "$PORT"
+            docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            for img in "$IMAGE_TAG" "$PREVIOUS_IMAGE"; do
+              [ -z "$img" ] && continue
+              echo "Trying image $img on port ${PORT}..."
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                -p "0.0.0.0:${PORT}:8080" \
+                --env-file .env \
+                -e ConfigUrl="$CONFIG_URL" \
+                -v "hiperbrains-${ENV}-data:/app/data" \
+                --restart unless-stopped \
+                --log-driver=json-file \
+                "$img" || continue
+              for _ in $(seq 1 25); do
+                if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+                  echo "Emergency start OK with $img"
+                  return 0
+                fi
+                sleep 2
+              done
+              docker logs "$CONTAINER_NAME" --tail 40 || true
+              docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+              free_port "$PORT"
+            done
+            if [ -f .env ]; then
+              grep -vE '^(HIPERBRAINS_DATABASE|DATABASE_URL)=' .env > .env.sqlite-fallback 2>/dev/null || cp .env .env.sqlite-fallback
+              echo "Trying SQLite-only .env (no Postgres)..."
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                -p "0.0.0.0:${PORT}:8080" \
+                --env-file .env.sqlite-fallback \
+                -e ConfigUrl="$CONFIG_URL" \
+                -v "hiperbrains-${ENV}-data:/app/data" \
+                --restart unless-stopped \
+                --log-driver=json-file \
+                "$IMAGE_TAG" || true
+              for _ in $(seq 1 25); do
+                if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+                  echo "Emergency start OK (SQLite fallback — set APPSETTINGS_JSON for login)"
+                  return 0
+                fi
+                sleep 2
+              done
+              docker logs "$CONTAINER_NAME" --tail 40 || true
+            fi
+            return 1
+          }
+
+          if ! ensure_port_up; then
+            echo "ERROR: Could not bring service up on port ${PORT}"
+            docker ps -a | head -20 || true
             exit 1
           fi
 
@@ -283,4 +351,5 @@ jobs:
 
           echo "====================================="
           echo "Deploy complete: http://127.0.0.1:${PORT}/health OK"
+          echo "Public: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${PORT}/health"
           echo "====================================="
