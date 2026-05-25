@@ -42,9 +42,9 @@ COPY --from=builder /build/backend/node_modules ./node_modules
 COPY --from=builder /build/backend/dist ./dist
 COPY --from=builder /build/backend/assets ./assets
 COPY --from=builder /build/frontend/angular-dashboard/dist ./frontend/angular-dashboard/dist
-# API keys + ConnectionStrings (appsettings.json from deploy runner; not in git)
+# Runtime appsettings mounted at deploy; example is the image default for build
 COPY appsettings.example.json ./appsettings.example.json
-COPY appsettings.json ./appsettings.json
+RUN cp appsettings.example.json appsettings.json
 
 RUN mkdir -p /app/data
 

@@ -107,8 +107,11 @@ jobs:
             if [ -n "$APPSETTINGS_JSON" ]; then
               printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
               echo "Wrote appsettings.json from APPSETTINGS_JSON secret"
+            elif [ -f appsettings.example.json ]; then
+              cp appsettings.example.json appsettings.json
+              echo "WARN: Using appsettings.example.json — set APPSETTINGS_JSON secret for production keys/DB"
             else
-              echo "ERROR: appsettings.json missing. Copy it to the runner repo root or set APPSETTINGS_JSON secret."
+              echo "ERROR: appsettings.json missing and no appsettings.example.json in repo."
               exit 1
             fi
           fi
@@ -134,7 +137,14 @@ jobs:
 
           echo "Loading database settings from config server..."
           export CONFIG_URL="$CONFIG_URL"
-          node scripts/append-config-to-env.js .env || echo "WARN: config server fetch failed; SQLite legacy mode"
+          if ! node scripts/append-config-to-env.js .env; then
+            echo "WARN: config server fetch failed — login disabled unless ConnectionStrings are in appsettings.json"
+          fi
+          if grep -qE '^HIPERBRAINS_DATABASE=|^DATABASE_URL=' .env 2>/dev/null; then
+            echo "PostgreSQL env configured (multi-tenant / login enabled)"
+          else
+            echo "WARN: No HIPERBRAINS_DATABASE in .env — /api/auth/mode will return multiTenant:false"
+          fi
 
           APPSETTINGS_MOUNT=""
           if [ -f appsettings.json ]; then
