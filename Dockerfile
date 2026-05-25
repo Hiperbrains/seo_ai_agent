@@ -10,19 +10,21 @@ WORKDIR /build
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Backend deps + Playwright browser
+# Backend deps + Playwright browser (chromium only)
 COPY backend/package.json backend/package-lock.json* ./backend/
-RUN cd backend && npm install && npx playwright install chromium
+RUN cd backend && npm ci && npx playwright install chromium \
+  && rm -rf /root/.npm /tmp/*
 
 COPY backend ./backend
 RUN cd backend && npm run build
 
 # Frontend
 COPY frontend/angular-dashboard/package.json frontend/angular-dashboard/package-lock.json* ./frontend/angular-dashboard/
-RUN cd frontend/angular-dashboard && npm install
+RUN cd frontend/angular-dashboard && npm ci && rm -rf /root/.npm /tmp/*
 
 COPY frontend/angular-dashboard ./frontend/angular-dashboard
-RUN cd frontend/angular-dashboard && npx ng build --configuration production
+RUN cd frontend/angular-dashboard && npx ng build --configuration production \
+  && rm -rf /root/.npm /tmp/* node_modules/.cache
 
 FROM node:20-bookworm-slim
 
@@ -43,8 +45,10 @@ COPY --from=builder /build/backend/dist ./dist
 COPY --from=builder /build/backend/assets ./assets
 COPY --from=builder /build/frontend/angular-dashboard/dist ./frontend/angular-dashboard/dist
 # appsettings.json is generated on the CI runner before docker build (not in git)
+ARG CONFIG_CACHE_BUST=1
 COPY appsettings.example.json ./appsettings.example.json
 COPY appsettings.json ./appsettings.json
+RUN echo "config:${CONFIG_CACHE_BUST}" > /dev/null
 
 RUN mkdir -p /app/data
 
