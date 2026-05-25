@@ -42,9 +42,9 @@ COPY --from=builder /build/backend/node_modules ./node_modules
 COPY --from=builder /build/backend/dist ./dist
 COPY --from=builder /build/backend/assets ./assets
 COPY --from=builder /build/frontend/angular-dashboard/dist ./frontend/angular-dashboard/dist
-# Runtime appsettings mounted at deploy; example is the image default for build
+# appsettings.json is generated on the CI runner before docker build (not in git)
 COPY appsettings.example.json ./appsettings.example.json
-RUN cp appsettings.example.json appsettings.json
+COPY appsettings.json ./appsettings.json
 
 RUN mkdir -p /app/data
 

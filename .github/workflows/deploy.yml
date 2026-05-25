@@ -103,6 +103,12 @@ jobs:
           echo "Env       : $ENV"
           echo "====================================="
 
+          # Self-hosted runners sometimes leave appsettings.json as a directory (breaks docker -v)
+          if [ -e appsettings.json ] && [ ! -f appsettings.json ]; then
+            rm -rf appsettings.json
+            echo "Removed appsettings.json directory from a prior failed deploy"
+          fi
+
           if [ ! -f appsettings.json ]; then
             if [ -n "$APPSETTINGS_JSON" ]; then
               printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
@@ -116,7 +122,13 @@ jobs:
             fi
           fi
 
-          echo "Building image..."
+          if [ ! -f appsettings.json ]; then
+            echo "ERROR: appsettings.json must be a regular file before docker build"
+            exit 1
+          fi
+          echo "appsettings.json OK ($(wc -c < appsettings.json) bytes)"
+
+          echo "Building image (appsettings baked into image, no runtime mount)..."
           docker build --no-cache -t "$IMAGE_TAG" .
 
           echo "Stopping existing container..."
@@ -136,19 +148,16 @@ jobs:
           EOF
 
           echo "Loading database settings from config server..."
-          export CONFIG_URL="$CONFIG_URL"
-          if ! node scripts/append-config-to-env.js .env; then
-            echo "WARN: config server fetch failed — login disabled unless ConnectionStrings are in appsettings.json"
+          if [ -z "$CONFIG_URL" ]; then
+            echo "WARN: CONFIG_URL empty — set CONFIG_SERVER_DEV (or APP) GitHub secret"
+          else
+            export CONFIG_URL="$CONFIG_URL"
+            node scripts/append-config-to-env.js .env || echo "WARN: config server fetch failed"
           fi
           if grep -qE '^HIPERBRAINS_DATABASE=|^DATABASE_URL=' .env 2>/dev/null; then
             echo "PostgreSQL env configured (multi-tenant / login enabled)"
           else
-            echo "WARN: No HIPERBRAINS_DATABASE in .env — /api/auth/mode will return multiTenant:false"
-          fi
-
-          APPSETTINGS_MOUNT=""
-          if [ -f appsettings.json ]; then
-            APPSETTINGS_MOUNT="-v $(pwd)/appsettings.json:/app/appsettings.json:ro"
+            echo "WARN: No HIPERBRAINS_DATABASE in .env — check APPSETTINGS_JSON ConnectionStrings or CONFIG_SERVER_*"
           fi
 
           echo "Starting new container..."
@@ -157,7 +166,6 @@ jobs:
             -p "${PORT}:8080" \
             --env-file .env \
             -e ConfigUrl="$CONFIG_URL" \
-            $APPSETTINGS_MOUNT \
             -v "hiperbrains-${ENV}-data:/app/data" \
             --restart unless-stopped \
             --log-driver=awslogs \
