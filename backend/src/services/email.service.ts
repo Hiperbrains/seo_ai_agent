@@ -1,15 +1,17 @@
 import nodemailer from 'nodemailer';
 import { getEmailConfig } from './secrets.service';
 import { logger } from '../utils/logger';
-import { getDb } from './db.service';
+import { dbAll, dbGet } from './db.service';
 import { loadScanReportFile } from './reportFile.service';
 import {
   buildScanReportPdf,
-  buildScanReportPdfFromPageReports,
+  renderPdf,
   ScanPdfIssueRow,
   ScanPdfMeta,
   suggestedFilename,
 } from './pdfReport.service';
+import { buildIntelligenceReport } from './intelligenceReport.service';
+import { getPublicAppUrl, resolveBrandLogoPath } from '../utils/brandAssets';
 
 export interface EmailReportPayload {
   scanId?: number;
@@ -21,25 +23,21 @@ export interface EmailReportPayload {
 }
 
 async function buildDownloadPdfAttachment(scanId: number): Promise<{ filename: string; content: Buffer }> {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT s.id, s.started_at, s.completed_at, s.pages_count, s.seo_score_avg, s.status, s.github_issues_created,
-              d.domain
-       FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ?`
-    )
-    .get(scanId) as
-    | {
-        id: number;
-        started_at: string;
-        completed_at: string | null;
-        pages_count: number;
-        seo_score_avg: number | null;
-        status: string;
-        github_issues_created: number;
-        domain: string;
-      }
-    | undefined;
+  const row = await dbGet<{
+    id: number;
+    started_at: string;
+    completed_at: string | null;
+    pages_count: number;
+    seo_score_avg: number | null;
+    status: string;
+    github_issues_created: number;
+    domain: string;
+  }>(
+    `SELECT s.id, s.started_at, s.completed_at, s.pages_count, s.seo_score_avg, s.status, s.github_issues_created,
+            d.domain
+     FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ?`,
+    [scanId]
+  );
 
   if (!row) throw new Error(`Scan not found for PDF attachment: ${scanId}`);
 
@@ -56,15 +54,14 @@ async function buildDownloadPdfAttachment(scanId: number): Promise<{ filename: s
 
   const stored = loadScanReportFile(scanId);
   const pdf = stored?.pageReports && Object.keys(stored.pageReports).length > 0
-    ? await buildScanReportPdfFromPageReports(meta, stored.pageReports)
+    ? await renderPdf(buildIntelligenceReport(stored))
     : await buildScanReportPdf(
         meta,
-        db
-          .prepare(
-            `SELECT page_url, issue_type, message, ai_suggestion, status, github_issue_url
-             FROM issues WHERE scan_id = ? ORDER BY page_url, id`
-          )
-          .all(scanId) as ScanPdfIssueRow[]
+        (await dbAll(
+          `SELECT page_url, issue_type, message, ai_suggestion, status, github_issue_url
+           FROM issues WHERE scan_id = ? ORDER BY page_url, id`,
+          [scanId]
+        )) as ScanPdfIssueRow[]
       );
 
   return { filename: suggestedFilename(row.domain, scanId), content: pdf };
@@ -80,80 +77,49 @@ export async function sendReportEmail(payload: EmailReportPayload): Promise<{ ok
     host,
     port,
     secure: port === 465,
-    auth: user && pass ? { user, pass } : undefined,
+    auth: pass ? { user, pass } : undefined,
   });
 
-  const subject = `SEO audit report: ${payload.domain}`;
-  const text = [
-    'SEO AUDIT REPORT',
-    '=================',
-    '',
-    `Domain scanned: ${payload.domain}`,
-    `Pages: ${payload.pagesCount}`,
-    `Issues detected: ${payload.issuesCount}`,
-    '',
-    'Top findings and suggestions:',
-    ...payload.aiSummaryLines.map((l) => `- ${l}`),
-    '',
-    'PDF report attached: open the attachment for full page-by-page findings and recommendations.',
-  ].join('\n');
+  const logoPath = resolveBrandLogoPath();
+  const publicUrl = getPublicAppUrl();
+  const summaryHtml = payload.aiSummaryLines
+    .slice(0, 15)
+    .map((line) => `<li>${line.replace(/</g, '&lt;')}</li>`)
+    .join('');
+
+  let attachments: { filename: string; content: Buffer }[] | undefined;
+  if (payload.scanId) {
+    try {
+      attachments = [await buildDownloadPdfAttachment(payload.scanId)];
+    } catch (e) {
+      logger.warn('PDF attachment skipped', { scanId: payload.scanId, error: String(e) });
+    }
+  }
+
   const html = `
-    <div style="background:#0f172a;padding:24px;font-family:Arial,'Segoe UI',Helvetica,sans-serif;color:#e2e8f0;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;">
-      <div style="max-width:680px;margin:0 auto;border:1px solid #334155;border-radius:12px;overflow:hidden;background:#111c33;">
-        <div style="padding:20px 22px;border-bottom:2px solid #5eead4;">
-          <div style="font-size:26px;font-weight:700;line-height:1.2;color:#e2e8f0;">AI SEO Agent</div>
-          <div style="margin-top:6px;color:#94a3b8;font-size:14px;">Your intelligent SEO audit assistant</div>
-        </div>
-        <div style="padding:22px;">
-          <p style="margin:0 0 14px;font-size:30px;font-weight:700;line-height:1.25;color:#e2e8f0;">Hi there,</p>
-          <p style="margin:0 0 18px;font-size:18px;line-height:1.5;color:#e2e8f0;">
-            I've finished analyzing <strong>${payload.domain}</strong>. Below is a quick snapshot.
-            Your <span style="color:#5eead4;font-weight:700;">full SEO audit</span> is attached as a PDF.
-          </p>
-          <div style="display:flex;gap:12px;flex-wrap:wrap;margin:0 0 16px;">
-            <div style="flex:1 1 220px;border:1px solid #334155;background:#111c33;border-radius:12px;padding:14px;">
-              <div style="font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;">Pages analyzed</div>
-              <div style="font-size:34px;font-weight:700;color:#e2e8f0;margin-top:4px;">${payload.pagesCount}</div>
-            </div>
-            <div style="flex:1 1 220px;border:1px solid #334155;background:#111c33;border-radius:12px;padding:14px;">
-              <div style="font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;">Issues flagged</div>
-              <div style="font-size:34px;font-weight:700;color:#e2e8f0;margin-top:4px;">${payload.issuesCount}</div>
-            </div>
-          </div>
-          <div style="border:1px solid #2c7a7b;background:#1e293b;border-radius:12px;padding:14px;">
-            <div style="font-size:26px;font-weight:700;color:#5eead4;margin-bottom:6px;">PDF report attached</div>
-            <div style="font-size:16px;line-height:1.45;color:#e2e8f0;">
-              Open the attachment for the complete breakdown: page-by-page findings, technical notes, and suggested fixes.
-            </div>
-          </div>
-          <p style="margin:22px 0 0;color:#94a3b8;">— AI SEO Agent</p>
-        </div>
-      </div>
-    </div>
-  `;
+    <div style="font-family:Inter,Arial,sans-serif;max-width:640px">
+      ${logoPath ? `<p><img src="cid:brand-logo" alt="AI SEO Agent" style="height:40px" /></p>` : ''}
+      <h2>SEO scan report — ${payload.domain}</h2>
+      <p>Pages analyzed: <strong>${payload.pagesCount}</strong> · Issues: <strong>${payload.issuesCount}</strong></p>
+      <ul>${summaryHtml}</ul>
+      ${publicUrl ? `<p><a href="${publicUrl}">Open dashboard</a></p>` : ''}
+    </div>`;
 
   try {
-    const pdfAttachment = payload.scanId ? await buildDownloadPdfAttachment(payload.scanId) : null;
-
     await transporter.sendMail({
       from: from || user,
       to: payload.to,
-      subject,
-      text,
+      subject: `SEO report: ${payload.domain}`,
       html,
-      attachments: pdfAttachment
+      attachments: logoPath
         ? [
-            {
-              filename: pdfAttachment.filename,
-              content: pdfAttachment.content,
-              contentType: 'application/pdf',
-            },
+            ...(attachments || []),
+            { filename: 'logo.png', path: logoPath, cid: 'brand-logo' },
           ]
-        : undefined,
+        : attachments,
     });
     return { ok: true };
   } catch (e) {
-    logger.error('sendReportEmail failed', { error: String(e) });
     return { ok: false, error: String(e) };
   }
 }

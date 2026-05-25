@@ -63,7 +63,14 @@ export interface SeoPageReport {
     rankingProbability: number;
     opportunityScore?: number;
     trendBoost?: number;
+    serpSignals?: {
+      competitionLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+      estimatedTopDomains: string[];
+      avgTitleLength: number;
+    };
+    recommendedWordCount?: string;
   };
+  recommendedWordCount?: string;
   backlinkInsights?: {
     internalReferringPages: number;
     uniqueExternalDomainsLinked: number;
@@ -99,6 +106,53 @@ export interface SeoPageReport {
     metaDescription?: string;
     bodyCopy?: string;
   };
+}
+
+export interface TrendKeywordInsight {
+  keyword: string;
+  category?: 'domain_trend' | 'long_tail' | 'blog_tofu' | 'bofu_comparison';
+  searchIntent: 'informational' | 'commercial' | 'transactional' | 'navigational';
+  reason: string;
+  suggestedPageUrl?: string;
+  updateAreas?: Array<'title' | 'h1' | 'meta_description' | 'body_content' | 'internal_links'>;
+  priorityScore: number;
+  serpSignals?: {
+    competitionLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+    estimatedTopDomains: string[];
+    avgTitleLength: number;
+  };
+  recommendedWordCount?: string;
+  seoCluster?: string;
+  blogTopic?: string;
+  sourceSignals?: string[];
+  opportunityScore?: number;
+}
+
+export interface ProductFeatureInsight {
+  feature: string;
+  sourceUrl?: string;
+  sourceType: 'settings' | 'use_case_page' | 'feature_page' | 'service_page' | 'content_inference';
+}
+
+export interface SeoActionPlanItem {
+  page: string;
+  action: string;
+  priority: 'HIGH' | 'MEDIUM' | 'LOW';
+  quickWin?: boolean;
+}
+
+export interface CompetitorGapItem {
+  keyword: string;
+  reason: string;
+  opportunityScore: number;
+}
+
+export interface KeywordClusterItem {
+  cluster: string;
+  keywords: string[];
+  count: number;
+  topPage: string;
+  coverage: 'LOW' | 'MEDIUM' | 'HIGH';
 }
 
 /** @deprecated use SeoPageReport */

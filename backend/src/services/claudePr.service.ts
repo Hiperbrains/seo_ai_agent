@@ -1,7 +1,8 @@
-import { getSetting } from './db.service';
+import { getActiveSetting } from './companyConfig.service';
 import { logger } from '../utils/logger';
 import { getGithubRepoParts, getGithubToken } from './secrets.service';
 import { loadScanReportFile } from './reportFile.service';
+import { buildIntelligenceReport } from './intelligenceReportService';
 
 export type ClaudePrCreateResult = {
   ok: boolean;
@@ -16,9 +17,9 @@ function getClaudeSettings(): {
   token: string;
 } {
   return {
-    instanceId: getSetting('CLAUDE_INSTANCE_ID') || '',
-    endpoint: getSetting('CLAUDE_PR_ENDPOINT') || '',
-    token: getSetting('CLAUDE_API_TOKEN') || '',
+    instanceId: getActiveSetting('CLAUDE_INSTANCE_ID') || '',
+    endpoint: getActiveSetting('CLAUDE_PR_ENDPOINT') || '',
+    token: getActiveSetting('CLAUDE_API_TOKEN') || '',
   };
 }
 
@@ -32,11 +33,11 @@ function getGitRepoSettings(): {
 } {
   const parts = getGithubRepoParts();
   return {
-    owner: getSetting('GITHUB_REPO_OWNER') || parts.owner,
-    repo: getSetting('GITHUB_REPO_NAME') || parts.repo,
-    defaultBranch: getSetting('GITHUB_DEFAULT_BRANCH') || 'main',
-    contentRootFolder: (getSetting('GITHUB_CONTENT_ROOT_FOLDER') || '').replace(/^\/+|\/+$/g, ''),
-    fileExtension: getSetting('GITHUB_FILE_EXTENSION') || '.html',
+    owner: getActiveSetting('GITHUB_REPO_OWNER') || parts.owner,
+    repo: getActiveSetting('GITHUB_REPO_NAME') || parts.repo,
+    defaultBranch: getActiveSetting('GITHUB_DEFAULT_BRANCH') || 'main',
+    contentRootFolder: (getActiveSetting('GITHUB_CONTENT_ROOT_FOLDER') || '').replace(/^\/+|\/+$/g, ''),
+    fileExtension: getActiveSetting('GITHUB_FILE_EXTENSION') || '.html',
     githubToken: getGithubToken() || '',
   };
 }
@@ -51,6 +52,7 @@ export async function createClaudePullRequest(params: {
   }
   const report = loadScanReportFile(params.scanId);
   if (!report) return { ok: false, error: 'Report file not found for this scan.' };
+  const intelligenceReport = buildIntelligenceReport(report);
 
   const git = getGitRepoSettings();
   if (!git.owner || !git.repo) {
@@ -71,7 +73,7 @@ export async function createClaudePullRequest(params: {
     credentials: {
       githubToken: git.githubToken,
     },
-    auditReport: report,
+    auditReport: intelligenceReport,
     instructions:
       'Create a GitHub pull request that applies actionable SEO fixes based on this audit report. Return JSON with prUrl.',
   } as const;

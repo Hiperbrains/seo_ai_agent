@@ -22,6 +22,7 @@
   border-radius: var(--radius);
   padding: 1.25rem;
   margin-top: 1rem;
+  box-shadow: var(--shadow-card);
 }
 
 .panel h2 {
@@ -60,22 +61,30 @@
 
 .scheduler-form input,
 .scheduler-form select {
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--input-bg);
+  color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0.55rem 0.65rem;
 }
 
 .scheduler-form button {
   width: fit-content;
   background: var(--accent);
-  color: #0f172a;
+  color: var(--on-accent);
   border: none;
-  border-radius: 8px;
-  padding: 0.5rem 0.9rem;
+  border-radius: var(--radius-pill);
+  padding: 0.55rem 1.25rem;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--shadow-cta);
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.scheduler-form button:hover:not(:disabled) {
+  background: var(--accent-hover);
 }
 
 .scheduler-form button:disabled {
@@ -97,7 +106,7 @@ table {
 th,
 td {
   padding: 0.48rem 0.45rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  border-bottom: 1px solid var(--border);
   text-align: left;
   white-space: nowrap;
 }
@@ -114,23 +123,23 @@ th {
   padding: 0.08rem 0.45rem;
   border-radius: 999px;
   font-size: 0.72rem;
-  border: 1px solid rgba(16, 185, 129, 0.35);
-  background: rgba(16, 185, 129, 0.14);
-  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.1);
+  color: #047857;
 }
 
 .state-pill.off {
-  border-color: rgba(148, 163, 184, 0.35);
-  background: rgba(148, 163, 184, 0.12);
-  color: #cbd5e1;
+  border-color: var(--border);
+  background: #f3f4f6;
+  color: var(--muted);
 }
 
 .cta-danger {
-  background: rgba(239, 68, 68, 0.18);
-  border: 1px solid rgba(239, 68, 68, 0.48);
-  color: #fecaca;
-  border-radius: 8px;
-  padding: 0.28rem 0.55rem;
+  background: #fef2f2;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #b91c1c;
+  border-radius: var(--radius-pill);
+  padding: 0.28rem 0.65rem;
   font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;
@@ -142,11 +151,11 @@ th {
 }
 
 .cta-success {
-  background: rgba(16, 185, 129, 0.18);
-  border: 1px solid rgba(16, 185, 129, 0.48);
-  color: #bbf7d0;
-  border-radius: 8px;
-  padding: 0.28rem 0.55rem;
+  background: #ecfdf5;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  color: #047857;
+  border-radius: var(--radius-pill);
+  padding: 0.28rem 0.65rem;
   font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;

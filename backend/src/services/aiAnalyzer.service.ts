@@ -1,9 +1,20 @@
 import OpenAI from 'openai';
-import { CrawlPageResult, SeoPageReport, AiIssueItem } from '../models/scan.model';
-import { getOpenAiKey } from './secrets.service';
+import {
+  CrawlPageResult,
+  SeoPageReport,
+  AiIssueItem,
+  TrendKeywordInsight,
+  ProductFeatureInsight,
+  SeoActionPlanItem,
+  CompetitorGapItem,
+  KeywordClusterItem,
+} from '../models/scan.model';
+import { getOpenAiKey, getOpenAiKeyAsync } from './secrets.service';
 import { logger } from '../utils/logger';
 import { config } from '../config/config';
 import type { PageSpeedMetrics } from './pagespeed.service';
+import { getActiveSetting } from './companyConfig.service';
+import { fetchTrendSeedKeywords } from './serpapi.service';
 
 type AggregateAudit = {
   total_pages: number;
@@ -22,6 +33,323 @@ type AggregateAiResponse = {
   internalLinkingTips?: string[];
   contentImprovementTips?: string[];
 };
+
+type TrendKeywordsAiResponse = {
+  trendKeywords?: Array<{
+    keyword?: string;
+    category?: 'domain_trend' | 'long_tail' | 'blog_tofu' | 'bofu_comparison';
+    searchIntent?: 'informational' | 'commercial' | 'transactional' | 'navigational';
+    reason?: string;
+    suggestedPageUrl?: string;
+    updateAreas?: Array<'title' | 'h1' | 'meta_description' | 'body_content' | 'internal_links'>;
+    priorityScore?: number;
+    seoCluster?: string;
+    blogTopic?: string;
+    sourceSignals?: string[];
+  }>;
+};
+
+const GENERIC_NAV_KEYWORDS = new Set([
+  'about',
+  'contact',
+  'book demo',
+  'enterprise',
+  'resellers',
+  'careers',
+  'investors',
+  'home',
+  'pricing',
+]);
+
+function classifyTrendKeyword(keyword: string): NonNullable<TrendKeywordInsight['category']> {
+  const k = keyword.toLowerCase();
+  if (k.includes(' vs ') || k.includes('alternative') || k.includes('alternatives') || k.includes('better than')) {
+    return 'bofu_comparison';
+  }
+  if (k.startsWith('how to ') || k.includes('guide') || k.includes('benefits') || k.includes('challenges')) {
+    return 'blog_tofu';
+  }
+  if (k.split(/\s+/).length >= 5 || k.includes(' for ') || k.includes(' in ')) {
+    return 'long_tail';
+  }
+  return 'domain_trend';
+}
+
+type TrendMetric = { searchVolume: number; trend: number };
+type SerpSignals = {
+  competitionLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+  estimatedTopDomains: string[];
+  avgTitleLength: number;
+};
+
+function buildTrendMap(externalTrendRows: Array<{ keyword: string; confidence: number }>): Map<string, TrendMetric> {
+  const m = new Map<string, TrendMetric>();
+  for (const row of externalTrendRows) {
+    const k = row.keyword.toLowerCase().trim();
+    if (!k) continue;
+    // We only get confidence from SerpAPI related queries, so map it into stable 0-100 proxies.
+    const trend = Math.max(20, Math.min(100, Number(row.confidence) || 50));
+    const searchVolume = Math.max(15, Math.min(100, Math.round(trend * 0.9 + 10)));
+    m.set(k, { searchVolume, trend });
+  }
+  return m;
+}
+
+function intentWeight(intent: TrendKeywordInsight['searchIntent']): number {
+  if (intent === 'transactional') return 100;
+  if (intent === 'commercial') return 85;
+  if (intent === 'informational') return 65;
+  return 45;
+}
+
+function getSerpSignals(keyword: string): SerpSignals {
+  const k = cleanTrendKeyword(keyword);
+  if (/\b(best|top|tools)\b/.test(k)) {
+    return {
+      competitionLevel: 'HIGH',
+      estimatedTopDomains: ['g2.com', 'capterra.com', 'linkedin.com'],
+      avgTitleLength: 58,
+    };
+  }
+  if (/\b(how to|guide)\b/.test(k)) {
+    return {
+      competitionLevel: 'MEDIUM',
+      estimatedTopDomains: ['hubspot.com', 'indeed.com', 'workable.com'],
+      avgTitleLength: 62,
+    };
+  }
+  return {
+    competitionLevel: 'LOW',
+    estimatedTopDomains: ['niche-saas-blog.com', 'industry-pages.com'],
+    avgTitleLength: 54,
+  };
+}
+
+function getRecommendedContentLength(_keyword: string, intent: string): string {
+  if (intent === 'informational') return '1200-2000';
+  if (intent === 'commercial') return '800-1200';
+  if (intent === 'transactional') return '500-800';
+  return '800-1200';
+}
+
+function computePriorityScore(
+  keyword: string,
+  intent: TrendKeywordInsight['searchIntent'],
+  metric?: { searchVolume?: number; trend?: number },
+  serpSignals?: SerpSignals
+): number {
+  const hasMetric = Number.isFinite(Number(metric?.searchVolume)) || Number.isFinite(Number(metric?.trend));
+  const searchVolume = hasMetric ? Math.max(0, Math.min(100, Number(metric?.searchVolume) || 45)) : 0;
+  const trend = hasMetric ? Math.max(0, Math.min(100, Number(metric?.trend) || 45)) : 0;
+  const intentScore = intentWeight(intent);
+  const baseScore = hasMetric
+    ? Math.round(searchVolume * 0.4 + trend * 0.3 + intentScore * 0.3)
+    : Math.round(55 * 0.4 + 50 * 0.3 + intentScore * 0.3);
+  const k = cleanTrendKeyword(keyword);
+  const conversionBoost = /\b(software|platform|solution)\b/.test(k) ? 15 : 0;
+  const comparisonBoost = /\b(vs|alternative|alternatives)\b/.test(k) ? 10 : 0;
+  const serpBoost = serpSignals?.competitionLevel === 'LOW' ? 6 : serpSignals?.competitionLevel === 'MEDIUM' ? 2 : -2;
+  return Math.max(1, Math.min(100, baseScore + conversionBoost + comparisonBoost + serpBoost));
+}
+
+function computeOpportunityScore(
+  priorityScore: number,
+  serpSignals: SerpSignals,
+  isMissingFromSite: boolean
+): number {
+  const lowCompetitionBonus = serpSignals.competitionLevel === 'LOW' ? 20 : 0;
+  const contentGapBonus = isMissingFromSite ? 15 : 0;
+  return Math.max(1, Math.min(100, Math.round(priorityScore * 0.6 + lowCompetitionBonus * 0.2 + contentGapBonus * 0.2)));
+}
+
+function isQuickWin(pageRank: number, seoScore: number): boolean {
+  return pageRank >= 20 && pageRank <= 50 && seoScore > 50;
+}
+
+function cleanTrendKeyword(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\bsoftware tools\b/g, 'software')
+    .replace(/\btools software\b/g, 'software')
+    .replace(/\btools tools\b/g, 'tools')
+    .trim();
+}
+
+function isValidKeyword(k: string): boolean {
+  const keyword = cleanTrendKeyword(k);
+  if (keyword.length < 5) return false;
+  if (keyword.split(' ').length < 3) return false;
+  if (/tools|software tools/.test(keyword)) return false;
+  return true;
+}
+
+function expandKeywords(baseKeyword: string): string[] {
+  const b = cleanTrendKeyword(baseKeyword);
+  if (!b) return [];
+  return [
+    `${b} software`,
+    `${b} for startups`,
+    `how to ${b}`,
+    `best ${b} tools`,
+  ]
+    .map((x) => cleanTrendKeyword(x))
+    .filter(Boolean);
+}
+
+function expandByIntent(keyword: string): {
+  transactional: string[];
+  informational: string[];
+  comparison: string[];
+} {
+  const k = cleanTrendKeyword(keyword);
+  return {
+    transactional: [`${k} software`, `${k} platform`, `${k} solution`].map(cleanTrendKeyword),
+    informational: [`how to ${k}`, `what is ${k}`, `${k} process`].map(cleanTrendKeyword),
+    comparison: [`${k} vs alternatives`, `best ${k} tools`, `${k} comparison`].map(cleanTrendKeyword),
+  };
+}
+
+function isWeakKeywordPattern(keyword: string): boolean {
+  const k = cleanTrendKeyword(keyword);
+  if (!k) return true;
+  if (k.split(/\s+/).length < 3) return true;
+  if (/\b(tools|software)\s+\1\b/.test(k)) return true;
+  if (/\bsoftware tools\b/.test(k)) return true;
+  return false;
+}
+
+function dedupeAndCleanKeywords(rows: TrendKeywordInsight[]): TrendKeywordInsight[] {
+  const seen = new Set<string>();
+  const out: TrendKeywordInsight[] = [];
+  for (const row of rows) {
+    const cleaned = cleanTrendKeyword(row.keyword);
+    if (!isValidKeyword(cleaned) || isWeakKeywordPattern(cleaned)) continue;
+    if (seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    out.push({ ...row, keyword: cleaned });
+  }
+  return out;
+}
+
+function enrichWithExpandedKeywords(
+  rows: TrendKeywordInsight[],
+  pages: CrawlPageResult[],
+  domain: string,
+  pageReports: Map<string, SeoPageReport>,
+  trendMap: Map<string, TrendMetric>
+): TrendKeywordInsight[] {
+  if (!rows.length) return [];
+  const expanded: TrendKeywordInsight[] = [];
+  for (const row of rows.slice(0, 6)) {
+    const byIntent = expandByIntent(row.keyword);
+    const candidates = [...byIntent.transactional, ...byIntent.informational, ...byIntent.comparison, ...expandKeywords(row.keyword)];
+    for (const kw of [...new Set(candidates)].slice(0, 4)) {
+      if (!isValidKeyword(kw)) continue;
+      expanded.push({
+        keyword: kw,
+        category: classifyTrendKeyword(kw),
+        searchIntent: row.searchIntent,
+        reason: `Expanded from core keyword "${row.keyword}" for stronger search-intent coverage.`,
+        suggestedPageUrl: mapKeywordToBestPageUrl(kw, pages, domain),
+        updateAreas: inferUpdateAreas(kw, mapKeywordToBestPageUrl(kw, pages, domain), pageReports),
+        serpSignals: getSerpSignals(kw),
+        recommendedWordCount: getRecommendedContentLength(kw, row.searchIntent),
+        priorityScore: computePriorityScore(
+          kw,
+          row.searchIntent,
+          trendMap.get(cleanTrendKeyword(kw)),
+          getSerpSignals(kw)
+        ),
+        seoCluster: row.seoCluster,
+        blogTopic: row.blogTopic,
+        sourceSignals: ['keyword_expansion_layer', ...(row.sourceSignals || [])].slice(0, 5),
+      });
+    }
+  }
+  return dedupeAndCleanKeywords([...rows, ...expanded]).slice(0, 12);
+}
+
+function bestHomepageUrl(pages: CrawlPageResult[], domain: string): string | undefined {
+  const domainNorm = domain.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, '').toLowerCase();
+  const home = pages.find((p) => {
+    try {
+      const u = new URL(p.url);
+      return u.hostname.replace(/^www\./, '').toLowerCase() === domainNorm && (u.pathname === '/' || u.pathname === '');
+    } catch {
+      return false;
+    }
+  });
+  return home?.url || pages[0]?.url;
+}
+
+function matchScore(keywordTokens: string[], candidateTokens: string[]): number {
+  if (!keywordTokens.length || !candidateTokens.length) return 0;
+  const set = new Set(candidateTokens);
+  const matched = keywordTokens.filter((t) => set.has(t)).length;
+  return matched / keywordTokens.length;
+}
+
+const TOKEN_SYNONYMS: Record<string, string[]> = {
+  hiring: ['recruitment', 'recruiting'],
+  interview: ['screening', 'assessment'],
+  candidate: ['applicant'],
+};
+
+function expandTokens(tokens: string[]): string[] {
+  const out = new Set(tokens);
+  for (const t of tokens) {
+    for (const s of TOKEN_SYNONYMS[t] || []) out.add(s);
+  }
+  return [...out];
+}
+
+function mapKeywordToBestPageUrl(keyword: string, pages: CrawlPageResult[], domain: string): string | undefined {
+  const kTokens = expandTokens(tokenize(keyword));
+  let best = { url: bestHomepageUrl(pages, domain), score: 0 };
+  for (const p of pages) {
+    const h1Text = (p.headings?.[0] || '').trim();
+    const titleText = p.title || '';
+    const headingText = (p.headings || []).join(' ');
+    const contentText = p.contentSnippet || '';
+    const weighted =
+      matchScore(kTokens, expandTokens(tokenize(h1Text || headingText))) * 0.5 +
+      matchScore(kTokens, expandTokens(tokenize(titleText))) * 0.3 +
+      matchScore(kTokens, expandTokens(tokenize(contentText))) * 0.2;
+    if (weighted > best.score) best = { url: p.url, score: weighted };
+  }
+  // Require stronger token overlap than picking a random page that only shares the brand name.
+  if (best.score < 0.38) return bestHomepageUrl(pages, domain);
+  return best.url;
+}
+
+function inferUpdateAreas(
+  keyword: string,
+  pageUrl: string | undefined,
+  pageReports: Map<string, SeoPageReport>
+): Array<'title' | 'h1' | 'meta_description' | 'body_content' | 'internal_links'> {
+  const areas = new Set<'title' | 'h1' | 'meta_description' | 'body_content' | 'internal_links'>();
+  const report = pageUrl ? pageReports.get(pageUrl) : undefined;
+  const issueTypes = new Set((report?.issues || []).map((i) => i.type));
+  const kw = keyword.toLowerCase();
+
+  if (issueTypes.has('missing_title') || issueTypes.has('duplicate_title')) areas.add('title');
+  if (issueTypes.has('missing_h1') || issueTypes.has('multiple_h1')) areas.add('h1');
+  if (issueTypes.has('missing_meta_description')) areas.add('meta_description');
+  if (issueTypes.has('low_word_count')) areas.add('body_content');
+  if (issueTypes.has('broken_links') || issueTypes.has('invalid_or_nonfunctional_link')) areas.add('internal_links');
+
+  // If no explicit issue signals exist, infer likely optimization zones from intent pattern.
+  if (areas.size === 0) {
+    if (kw.startsWith('how to ') || kw.includes('guide') || kw.includes('benefits')) areas.add('body_content');
+    else areas.add('title');
+    areas.add('h1');
+    areas.add('meta_description');
+  }
+
+  return [...areas].slice(0, 5);
+}
 
 type PageAiResponse = {
   pasteReadyFixes?: { issueType?: string; issueSummary?: string; improvedContent?: string }[];
@@ -123,6 +451,569 @@ function normalizeReport(raw: Partial<SeoPageReport>, pageUrl: string): SeoPageR
   };
 }
 
+function normalizeTrendKeywords(
+  raw: TrendKeywordsAiResponse | null | undefined,
+  pages: CrawlPageResult[],
+  domain: string,
+  trendMap: Map<string, TrendMetric>,
+  pageReports: Map<string, SeoPageReport>
+): TrendKeywordInsight[] {
+  const isLowValueKeyword = (kw: string): boolean => {
+    const k = kw.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!k || k.length < 4) return true;
+    if (GENERIC_NAV_KEYWORDS.has(k)) return true;
+    if ([...GENERIC_NAV_KEYWORDS].some((g) => k === `${g} 2025` || k === `${g} 2026` || k === `${g} 2027`)) return true;
+    if (/^(about|contact|home|pricing|enterprise|resellers)\s+\d{4}$/.test(k)) return true;
+    return false;
+  };
+  const rows = Array.isArray(raw?.trendKeywords) ? raw?.trendKeywords : [];
+  const internalKeywordSet = new Set(getCurrentKeywords(pageReports).map((k) => cleanTrendKeyword(k)));
+  const normalized = dedupeAndCleanKeywords(
+    rows
+    .map((r) => ({
+      keyword: String(r?.keyword || '').trim(),
+      category: (['domain_trend', 'long_tail', 'blog_tofu', 'bofu_comparison'].includes(String(r?.category || ''))
+        ? (r?.category as TrendKeywordInsight['category'])
+        : classifyTrendKeyword(String(r?.keyword || ''))) as TrendKeywordInsight['category'],
+      searchIntent: (['informational', 'commercial', 'transactional', 'navigational'].includes(
+        String(r?.searchIntent || '')
+      )
+        ? r?.searchIntent
+        : 'informational') as TrendKeywordInsight['searchIntent'],
+      reason: String(r?.reason || '').trim(),
+      suggestedPageUrl: mapKeywordToBestPageUrl(String(r?.keyword || ''), pages, domain),
+      updateAreas: Array.isArray(r?.updateAreas)
+        ? r.updateAreas.filter((x) =>
+            ['title', 'h1', 'meta_description', 'body_content', 'internal_links'].includes(String(x))
+          )
+        : undefined,
+      serpSignals: getSerpSignals(String(r?.keyword || '')),
+      recommendedWordCount: getRecommendedContentLength(
+        String(r?.keyword || ''),
+        (['informational', 'commercial', 'transactional', 'navigational'].includes(String(r?.searchIntent || ''))
+          ? String(r?.searchIntent || 'informational')
+          : 'informational')
+      ),
+      priorityScore: computePriorityScore(
+        String(r?.keyword || ''),
+        (['informational', 'commercial', 'transactional', 'navigational'].includes(String(r?.searchIntent || ''))
+          ? (r?.searchIntent as TrendKeywordInsight['searchIntent'])
+          : 'informational') as TrendKeywordInsight['searchIntent'],
+        trendMap.get(cleanTrendKeyword(String(r?.keyword || ''))),
+        getSerpSignals(String(r?.keyword || ''))
+      ),
+      seoCluster: String(r?.seoCluster || '').trim() || undefined,
+      blogTopic: String(r?.blogTopic || '').trim() || undefined,
+      sourceSignals: Array.isArray(r?.sourceSignals)
+        ? r.sourceSignals.map((x) => String(x).trim()).filter(Boolean).slice(0, 5)
+        : undefined,
+    }))
+    .filter((r) => r.keyword.length >= 3 && r.reason.length >= 8 && !isLowValueKeyword(r.keyword))
+    .map((row) => ({
+      ...row,
+      seoCluster: row.seoCluster || clusterLabelFromKeyword(row.keyword),
+      updateAreas: row.updateAreas?.length
+        ? row.updateAreas
+        : inferUpdateAreas(row.keyword, row.suggestedPageUrl, pageReports),
+      opportunityScore: computeOpportunityScore(
+        row.priorityScore,
+        row.serpSignals || getSerpSignals(row.keyword),
+        !internalKeywordSet.has(cleanTrendKeyword(row.keyword))
+      ),
+    }))
+    .sort((a, b) => b.priorityScore - a.priorityScore)
+    .slice(0, 12)
+  );
+  return normalized.length ? normalized : [];
+}
+
+function buildTrendKeywordPrompt(
+  domain: string,
+  productFeatures: string[],
+  currentKeywords: string[],
+  externalTrendSignals: string[],
+  competitorKeywords: string[],
+  pages: CrawlPageResult[],
+  pageReports: Map<string, SeoPageReport>
+): string {
+  const samples = pages.slice(0, 20).map((p) => ({
+    url: p.url,
+    title: p.title,
+    h1: p.headings[0] || '',
+    existingTargetKeyword: pageReports.get(p.url)?.keywordInsights?.targetKeyword || '',
+  }));
+  return `You are an SEO strategist.
+
+Generate trend-focused keyword opportunities for this website.
+Use realistic SEO logic (freshness, intent, topic fit, and likely traffic potential).
+Infer the site's industry and offers ONLY from "domain" and "pageSamples" (titles, headings, URLs). Ignore any productFeatures entries that clearly conflict with what the sampled pages are about.
+Do NOT assume recruitment, ATS, or hiring tech unless pageSamples clearly show that niche.
+Do NOT generate generic navigation keywords (about, contact, book demo, enterprise, resellers, pricing).
+Do NOT create fake trend terms by simply appending a year to generic page names.
+Ensure output includes all 4 categories where possible: domain_trend, long_tail, blog_tofu, bofu_comparison.
+For each keyword, provide updateAreas from this list: title, h1, meta_description, body_content, internal_links.
+ONLY generate keywords that:
+- are real search-style Google queries
+- are natural phrases (not robotic)
+- are not repetitive variations
+- match the site's actual products, services, or problems implied by pageSamples
+BAD examples:
+- generic page name + year only
+- unrelated vertical (e.g. hiring software for a manufacturing IT services site)
+GOOD examples (illustrative only — adapt to the real niche):
+- enterprise cloud migration strategy
+- low code automation for financial services
+- salesforce integration best practices
+Return JSON only.
+
+Input:
+${JSON.stringify(
+  {
+    domain,
+    productFeatures,
+    currentKeywords,
+    externalTrendSignals,
+    competitorKeywords,
+    pageSamples: samples,
+  },
+  null,
+  2
+)}
+
+Output schema:
+{
+  "trendKeywords": [
+    {
+      "keyword": "example keyword",
+      "category": "domain_trend",
+      "searchIntent": "informational",
+      "reason": "Why this trend keyword is relevant for the site right now.",
+      "suggestedPageUrl": "https://example.com/some-page",
+      "updateAreas": ["title", "h1", "meta_description"],
+      "priorityScore": 85,
+      "seoCluster": "Core service theme from samples",
+      "blogTopic": "Educational angle aligned to the same theme",
+      "sourceSignals": ["product_features", "existing_keywords", "external_trend_data"]
+    }
+  ]
+}`;
+}
+
+function getProductFeatures(): string[] {
+  const raw = getActiveSetting('PRODUCT_FEATURES') || process.env.PRODUCT_FEATURES || '';
+  return raw
+    .split(/[,\n|]/)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 2)
+    .slice(0, 25);
+}
+
+const DOMAIN_SEED_STOP = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'your',
+  'from',
+  'that',
+  'this',
+  'our',
+  'are',
+  'was',
+  'has',
+  'have',
+  'home',
+  'page',
+  'blog',
+  'news',
+  'read',
+  'more',
+  'get',
+  'use',
+  'all',
+  'new',
+  'top',
+]);
+
+/** Derive short topic seeds from the crawled site (titles, headings, slugs) — not from a fixed vertical. */
+export function extractDomainSeedPhrases(pages: CrawlPageResult[], domainInput: string): string[] {
+  const host = domainInput
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split('/')[0]
+    .toLowerCase();
+  const brandToken = host.split('.').filter(Boolean)[0] || 'site';
+  const brandPhrase = brandToken.replace(/[^a-z0-9-]/gi, '').replace(/-/g, ' ').trim() || 'site';
+  const seeds = new Set<string>();
+  if (brandPhrase.length >= 2) {
+    seeds.add(`${brandPhrase} services`);
+    seeds.add(`${brandPhrase} solutions`);
+  }
+
+  const pushNgrams = (raw: string) => {
+    const words = raw
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !DOMAIN_SEED_STOP.has(w));
+    for (let i = 0; i < words.length - 1; i++) {
+      const bi = `${words[i]} ${words[i + 1]}`;
+      if (bi.length >= 6) seeds.add(bi);
+    }
+    for (let i = 0; i < words.length - 2; i++) {
+      const tri = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+      if (tri.length >= 10 && tri.length <= 70) seeds.add(tri);
+    }
+  };
+
+  for (const p of pages.slice(0, 30)) {
+    try {
+      const slug = new URL(p.url).pathname.split('/').filter(Boolean).slice(-1)[0]?.replace(/[-_]+/g, ' ') || '';
+      if (slug.length > 3) pushNgrams(slug);
+    } catch {
+      /* ignore */
+    }
+    const blob = [p.title, ...(p.headings || []).slice(0, 3), p.metaDescription || ''].join(' ');
+    pushNgrams(blob);
+    const titleShort = p.title
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (titleShort.length >= 10 && titleShort.length <= 72) seeds.add(titleShort);
+  }
+
+  return [...seeds]
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter((s) => s.length >= 4 && s.length <= 85)
+    .slice(0, 14);
+}
+
+function minimalCrawlPagesFromReports(pageReports: Map<string, SeoPageReport>): CrawlPageResult[] {
+  const out: CrawlPageResult[] = [];
+  for (const [url, r] of pageReports.entries()) {
+    const h1 = r.improvedContent?.h1 || '';
+    out.push({
+      url,
+      title: r.suggestedTitle || '',
+      metaDescription: r.suggestedMetaDescription || '',
+      canonical: '',
+      h1Count: h1 ? 1 : 0,
+      h2Count: 0,
+      wordCount: 0,
+      headings: h1 ? [h1] : [],
+      links: [],
+      imagesWithoutAlt: 0,
+      brokenLinks: [],
+      invalidNavLinks: [],
+      loadTimeMs: 0,
+      contentSnippet: r.improvedContent?.bodyCopy,
+    });
+  }
+  return out;
+}
+
+function inferFeaturesFromText(text: string): string[] {
+  const known = [
+    'resume parser',
+    'coding test',
+    'ai interview',
+    'interview bot',
+    'candidate ranking',
+    'hiring analytics',
+    'smart scheduler',
+    'phone screening',
+    'job post generator',
+    'proctoring',
+    'technical hiring platform',
+    'recruitment automation',
+    'talent assessment',
+  ];
+  const lower = text.toLowerCase();
+  return known.filter((k) => lower.includes(k));
+}
+
+export function extractProductFeaturesFromPages(pages: CrawlPageResult[]): ProductFeatureInsight[] {
+  const rows: ProductFeatureInsight[] = [];
+  const seen = new Set<string>();
+  for (const p of pages) {
+    const path = new URL(p.url).pathname.toLowerCase();
+    const sourceType: ProductFeatureInsight['sourceType'] =
+      path.includes('use-case') || path.includes('usecase')
+        ? 'use_case_page'
+        : path.includes('feature') || path.includes('agent')
+          ? 'feature_page'
+          : path.includes('service') || path.includes('solution') || path.includes('product')
+            ? 'service_page'
+            : 'content_inference';
+    const boostPath =
+      sourceType === 'use_case_page' || sourceType === 'feature_page' || sourceType === 'service_page';
+    const pool = `${p.title} ${(p.headings || []).join(' ')} ${p.contentSnippet || ''}`.slice(0, 2000);
+    const inferred = inferFeaturesFromText(pool);
+    if (!inferred.length && !boostPath) continue;
+    for (const feature of inferred) {
+      const key = feature.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ feature, sourceUrl: p.url, sourceType });
+    }
+  }
+  return rows.slice(0, 25);
+}
+
+function getCurrentKeywords(pageReports: Map<string, SeoPageReport>): string[] {
+  const set = new Set<string>();
+  for (const rep of pageReports.values()) {
+    const k = String(rep.keywordInsights?.targetKeyword || '').trim();
+    if (k.length >= 3) set.add(k);
+  }
+  return [...set].slice(0, 20);
+}
+
+function buildDynamicCompetitorGapKeywords(domain: string, pages: CrawlPageResult[], currentKeywords: string[]): string[] {
+  const seeds = extractDomainSeedPhrases(pages, domain).slice(0, 5);
+  const gaps: string[] = [];
+  const push = (k: string) => {
+    const t = k.replace(/\s+/g, ' ').trim();
+    if (t.length >= 8 && t.length < 92) gaps.push(t);
+  };
+  for (const s of seeds) {
+    if (!s) continue;
+    push(`best ${s} software`);
+    push(`${s} implementation guide`);
+    push(`what is ${s}`);
+    push(`${s} vs alternatives`);
+  }
+  if (gaps.length < 4) {
+    const host = domain
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .split('.')[0]
+      ?.replace(/[^a-z0-9-]/gi, '')
+      .replace(/-/g, ' ')
+      .trim();
+    if (host && host.length >= 2) {
+      push(`best ${host} platform`);
+      push(`what is ${host}`);
+      push(`${host} services comparison`);
+    }
+  }
+  return [...new Set(gaps)].slice(0, 8);
+}
+
+function competitorKeywordGaps(currentKeywords: string[], domain: string, pages: CrawlPageResult[]): CompetitorGapItem[] {
+  const current = new Set(currentKeywords.map((k) => cleanTrendKeyword(k)));
+  const expandedInternal = new Set<string>();
+  for (const k of currentKeywords) {
+    const byIntent = expandByIntent(k);
+    for (const x of [...expandKeywords(k), ...byIntent.transactional, ...byIntent.informational, ...byIntent.comparison]) {
+      expandedInternal.add(cleanTrendKeyword(x));
+    }
+  }
+  return buildDynamicCompetitorGapKeywords(domain, pages, currentKeywords)
+    .filter((k) => !current.has(cleanTrendKeyword(k)) && !expandedInternal.has(cleanTrendKeyword(k)))
+    .slice(0, 8)
+    .map((keyword) => ({
+      keyword,
+      reason: 'Missing from site coverage (derived from crawled topics)',
+      opportunityScore: computeOpportunityScore(
+        computePriorityScore(keyword, 'commercial', { searchVolume: 70, trend: 60 }, getSerpSignals(keyword)),
+        getSerpSignals(keyword),
+        true
+      ),
+    }));
+}
+
+function generateActionPlan(
+  reports: Map<string, SeoPageReport>,
+  trendKeywords: TrendKeywordInsight[]
+): string[] {
+  const allIssues = [...reports.values()].flatMap((r) => r.issues.map((i) => i.type));
+  const has = (t: string): boolean => allIssues.includes(t);
+  const topKeyword = trendKeywords[0]?.keyword;
+  const actions: string[] = [];
+  if (has('missing_h1')) actions.push('Fix missing H1 tags on all affected pages.');
+  if (has('missing_title') || has('duplicate_title')) actions.push('Rewrite page titles with intent-focused keywords.');
+  if (has('low_word_count')) actions.push('Add 500+ words of focused content on thin pages.');
+  if (topKeyword) actions.push(`Create/optimize a landing page for "${topKeyword}".`);
+  actions.push('Add internal links between feature/use-case pages with descriptive anchors.');
+  return [...new Set(actions)].slice(0, 5);
+}
+
+function generateActionPlanItems(
+  reports: Map<string, SeoPageReport>,
+  trendKeywords: TrendKeywordInsight[]
+): SeoActionPlanItem[] {
+  const rows: SeoActionPlanItem[] = [];
+  const top = trendKeywords.slice(0, 6);
+  for (const k of top) {
+    const page = k.suggestedPageUrl || [...reports.keys()][0] || '/';
+    const pageSeoScore = reports.get(page)?.seoScore ?? 0;
+    const pageRank = Math.max(1, Math.min(100, 100 - Math.round(k.priorityScore)));
+    const quickWin = isQuickWin(pageRank, pageSeoScore);
+    rows.push({
+      page,
+      action: `Add/update 500+ words targeting "${k.keyword}" and optimize ${k.updateAreas?.join(', ') || 'title, h1, meta_description'}.`,
+      priority: quickWin ? 'HIGH' : k.priorityScore >= 75 ? 'HIGH' : k.priorityScore >= 55 ? 'MEDIUM' : 'LOW',
+      quickWin,
+    });
+  }
+  return rows.slice(0, 5);
+}
+
+function buildKeywordClusters(keywords: TrendKeywordInsight[]): KeywordClusterItem[] {
+  const groups = new Map<string, TrendKeywordInsight[]>();
+  for (const k of keywords) {
+    const cluster = clusterLabelFromKeyword(k.keyword) || 'general';
+    const arr = groups.get(cluster) ?? [];
+    arr.push(k);
+    groups.set(cluster, arr);
+  }
+  const out: KeywordClusterItem[] = [];
+  for (const [cluster, rows] of groups) {
+    const topPage = rows[0]?.suggestedPageUrl || '/';
+    const count = rows.length;
+    const coverage = count > 5 ? 'HIGH' : count >= 3 ? 'MEDIUM' : 'LOW';
+    out.push({
+      cluster,
+      keywords: [...new Set(rows.map((r) => r.keyword))].slice(0, 10),
+      count,
+      topPage,
+      coverage,
+    });
+  }
+  return out.sort((a, b) => b.count - a.count).slice(0, 10);
+}
+
+export function buildKeywordActionPlanForReport(
+  pageReports: Map<string, SeoPageReport>,
+  trendKeywords: TrendKeywordInsight[]
+): string[] {
+  return generateActionPlan(pageReports, trendKeywords);
+}
+
+export function buildKeywordActionPlanItemsForReport(
+  pageReports: Map<string, SeoPageReport>,
+  trendKeywords: TrendKeywordInsight[]
+): SeoActionPlanItem[] {
+  return generateActionPlanItems(pageReports, trendKeywords);
+}
+
+export function buildCompetitorKeywordGapsForReport(
+  pageReports: Map<string, SeoPageReport>,
+  domain = '',
+  pages: CrawlPageResult[] = []
+): CompetitorGapItem[] {
+  const crawlPages = pages.length ? pages : minimalCrawlPagesFromReports(pageReports);
+  return competitorKeywordGaps(getCurrentKeywords(pageReports), domain, crawlPages);
+}
+
+export function buildKeywordClustersForReport(trendKeywords: TrendKeywordInsight[]): KeywordClusterItem[] {
+  return buildKeywordClusters(trendKeywords);
+}
+
+export function buildTopOpportunitiesForReport(trendKeywords: TrendKeywordInsight[]): TrendKeywordInsight[] {
+  return [...trendKeywords].sort((a, b) => (b.opportunityScore ?? b.priorityScore) - (a.opportunityScore ?? a.priorityScore)).slice(0, 5);
+}
+
+export function buildQuickWinsForReport(
+  trendKeywords: TrendKeywordInsight[],
+  pageReports: Map<string, SeoPageReport>
+): TrendKeywordInsight[] {
+  return trendKeywords
+    .filter((k) => {
+      const page = k.suggestedPageUrl || '';
+      const seoScore = pageReports.get(page)?.seoScore ?? 0;
+      const pageRank = Math.max(1, Math.min(100, 100 - Math.round(k.priorityScore)));
+      return isQuickWin(pageRank, seoScore);
+    })
+    .slice(0, 5);
+}
+
+function getStableJitter(url: string): number {
+  let hash = 0;
+  for (let i = 0; i < url.length; i++) {
+    hash = (hash << 5) - hash + url.charCodeAt(i);
+    hash |= 0;
+  }
+  return (hash % 5) - 2;
+}
+
+function clusterLabelFromKeyword(keyword: string): string {
+  const k = cleanTrendKeyword(keyword)
+    .replace(/\brecruitment\b/g, 'hiring')
+    .replace(/\brecruiting\b/g, 'hiring')
+    .replace(/\bsoftware\b/g, 'platform')
+    .replace(/\btools?\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return k.split(' ').slice(0, 3).join(' ');
+}
+
+export async function generateTrendKeywordsForDomain(
+  domain: string,
+  pages: CrawlPageResult[],
+  pageReports: Map<string, SeoPageReport>,
+  extractedProductFeatures: ProductFeatureInsight[] = []
+): Promise<TrendKeywordInsight[]> {
+  const settingFeatures = getProductFeatures();
+  const pageFeatures = extractedProductFeatures.map((x) => x.feature);
+  const topicSeeds = extractDomainSeedPhrases(pages, domain);
+  const productFeatures = [...new Set([...topicSeeds, ...pageFeatures, ...settingFeatures])].slice(0, 25);
+  const currentKeywords = getCurrentKeywords(pageReports);
+  const competitorKeywords = competitorKeywordGaps(currentKeywords, domain, pages).map((x) => x.keyword);
+  const externalTrendRows = await fetchTrendSeedKeywords(
+    [...currentKeywords.slice(0, 4), ...productFeatures.slice(0, 3)],
+    'India'
+  );
+  const trendMap = buildTrendMap(externalTrendRows);
+  const externalTrendSignals = externalTrendRows.map((x) => x.keyword);
+  const key = await getOpenAiKeyAsync();
+  if (!key) {
+    logger.warn('OpenAI API key missing; trendKeywords not generated (no fallback).', { domain });
+    return [];
+  }
+  try {
+    const client = new OpenAI({ apiKey: key });
+    const completion = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an SEO strategist. Return only valid JSON. Use all provided inputs and produce practical trend keywords, blog topics, and SEO clusters.',
+        },
+        {
+          role: 'user',
+          content: buildTrendKeywordPrompt(
+            domain,
+            productFeatures,
+            currentKeywords,
+            externalTrendSignals,
+            competitorKeywords,
+            pages,
+            pageReports
+          ),
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 1400,
+      response_format: { type: 'json_object' },
+    });
+    const text = completion.choices[0]?.message?.content?.trim() || '{}';
+    const parsed = JSON.parse(text) as TrendKeywordsAiResponse;
+    const normalized = normalizeTrendKeywords(parsed, pages, domain, trendMap, pageReports);
+    if (!normalized.length) {
+      logger.warn('OpenAI returned no usable trend keywords after normalization.', { domain });
+    }
+    return enrichWithExpandedKeywords(normalized, pages, domain, pageReports, trendMap);
+  } catch (e) {
+    logger.warn('OpenAI trend keyword generation failed; no fallback keywords returned.', { domain, error: String(e) });
+    return [];
+  }
+}
+
 export async function analyzePageWithAi(page: CrawlPageResult): Promise<SeoPageReport> {
   const map = await analyzePagesWithAi([page]);
   return (
@@ -159,6 +1050,20 @@ function pageTopic(page: CrawlPageResult): string {
     .slice(0, 80);
 }
 
+function extractRealKeyword(page: CrawlPageResult): string {
+  const text = `${page.title} ${page.headings[0] || ''}`.toLowerCase();
+  const stopWords = new Set(['about', 'contact', 'home', 'page', 'welcome']);
+  const keyword = text
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length > 2 && !stopWords.has(w))
+    .slice(0, 4)
+    .join(' ')
+    .trim();
+  return keyword || pageTopic(page).toLowerCase();
+}
+
 function titleSuggestion(page: CrawlPageResult, forceUnique = false): string {
   const cleaned = page.title.trim();
   if (!forceUnique && cleaned.length >= 30 && cleaned.length <= 60) return cleaned;
@@ -184,18 +1089,24 @@ function h1Suggestion(page: CrawlPageResult): string {
 
 function bodyCopySuggestion(page: CrawlPageResult): string {
   const topic = pageTopic(page) || 'this page';
-  const host = new URL(page.url).hostname.replace(/^www\./, '');
-  const intentHint = page.url.includes('/blog')
-    ? 'practical insights and expert guidance'
-    : page.url.includes('/contact')
-      ? 'ways to connect with our team and get support'
-      : page.url.includes('/about')
-        ? 'who we are, what we do, and the value we deliver'
-        : 'key capabilities, benefits, and implementation details';
+  const keyword = extractRealKeyword(page) || topic.toLowerCase();
+  const pool = `${page.title} ${(page.headings || []).join(' ')} ${page.contentSnippet || ''}`;
+  const features = inferFeaturesFromText(pool);
+  const tokens = tokenize(pool).filter((t) => t.length > 4);
+  const genericCaps = ['clarity', 'workflow automation', 'integration readiness', 'scalable delivery'];
+  const [feature1, feature2, feature3] = [
+    features[0] || tokens[0] || genericCaps[0],
+    features[1] || tokens[1] || genericCaps[1],
+    features[2] || tokens[2] || genericCaps[2],
+  ];
+  const mainProblem = page.url.toLowerCase().includes('/blog')
+    ? 'fragmented information and weak topical depth'
+    : 'operational friction and unclear value for visitors';
+  const [benefit1, benefit2] = ['clarity for buyers', 'conversion and trust'];
   return (
-    `${topic} on ${host} provides ${intentHint}. ` +
-    `This page should clearly explain core features, expected outcomes, and real-world use cases for decision-makers. ` +
-    `Add a concise value proposition, trust signals, and a clear next step so users can evaluate fit and take action confidently.`
+    `${keyword} addresses ${mainProblem} for teams evaluating ${topic.toLowerCase()}. ` +
+    `It highlights ${feature1}, ${feature2}, and ${feature3}. ` +
+    `Strengthen this narrative to improve ${benefit1} and ${benefit2}.`
   ).slice(0, 700);
 }
 
@@ -240,7 +1151,7 @@ function computeFreeKeywordInsights(
   const headingTokens = tokenize((page.headings || []).join(' '));
   const bodyTokens = tokenize(page.contentSnippet || '');
 
-  const keyword = topic || 'general topic';
+  const keyword = extractRealKeyword(page) || topic || 'general topic';
   const relevanceOverlap = uniqueCount(topicTokens.filter((t) => titleTokens.includes(t) || headingTokens.includes(t)));
   const relevanceBase = topicTokens.length ? Math.round((relevanceOverlap / topicTokens.length) * 100) : 50;
   const titleMatchBoost = page.title.toLowerCase().includes(keyword) ? 15 : 0;
@@ -276,6 +1187,8 @@ function computeFreeKeywordInsights(
     rankingProbability,
     opportunityScore,
     trendBoost,
+    serpSignals: getSerpSignals(keyword),
+    recommendedWordCount: getRecommendedContentLength(keyword, page.url.includes('/blog') ? 'informational' : 'commercial'),
   };
 }
 
@@ -387,6 +1300,26 @@ function buildLocalPasteReadyFixes(
   if (issueTypes.includes('low_word_count')) {
     byType.set('low_word_count', improved.bodyCopy);
   }
+  if (issueTypes.includes('broken_links') && page.brokenLinks.length) {
+    const list = page.brokenLinks.slice(0, 15).join(' | ');
+    const more = page.brokenLinks.length > 15 ? ` (+${page.brokenLinks.length - 15} more)` : '';
+    byType.set('broken_links', `Targets: ${list}${more}`);
+  }
+  if (issueTypes.includes('invalid_or_nonfunctional_link') && (page.invalidNavLinks?.length || 0) > 0) {
+    const list = (page.invalidNavLinks || [])
+      .slice(0, 8)
+      .map((x) => `${x.href} (${x.reason})`)
+      .join(' | ');
+    byType.set('invalid_or_nonfunctional_link', list);
+  }
+  if (issueTypes.includes('images_without_alt') && page.imagesWithoutAlt > 0) {
+    const imgs = (page.images || []).filter((i) => !String(i.alt || '').trim()).slice(0, 5);
+    const list = imgs.map((i) => i.src.replace(/\s+/g, ' ').slice(0, 90)).join(' | ');
+    byType.set(
+      'images_without_alt',
+      list ? `Add alt for: ${list}` : `Add descriptive alt text to ${page.imagesWithoutAlt} image(s).`
+    );
+  }
 
   const pasteReadyFixes = issueTypes
     .filter((t) => byType.has(t))
@@ -417,6 +1350,12 @@ ${JSON.stringify(
     headings: page.headings.slice(0, 5),
     h1Count: page.h1Count,
     wordCount: page.wordCount,
+    brokenLinks: page.brokenLinks.slice(0, 25),
+    invalidNavLinks: (page.invalidNavLinks || []).slice(0, 12),
+    imagesMissingAltPreview: (page.images || [])
+      .filter((i) => !String(i.alt || '').trim())
+      .slice(0, 8)
+      .map((i) => ({ src: i.src.slice(0, 160), alt: i.alt })),
     contentSnippet: (page.contentSnippet || '').slice(0, 650),
     issueTypes,
     duplicateTitle,
@@ -436,6 +1375,9 @@ Requirements:
 - For duplicate_title or missing_title, provide only title text.
 - For missing_meta_description, provide only meta description text.
 - For low_word_count, provide one ready-to-paste paragraph.
+- If issueTypes includes broken_links: include one pasteReadyFixes row with issueType "broken_links" and improvedContent listing each broken target URL and the action (remove link, update href, or restore page).
+- If issueTypes includes invalid_or_nonfunctional_link: include pasteReadyFixes row(s) with concrete href + fix.
+- If issueTypes includes images_without_alt: include pasteReadyFixes with suggested alt text per preview image src (short phrases).
 
 Output schema:
 {
@@ -529,8 +1471,57 @@ function computeSeoScore(page: CrawlPageResult, duplicateTitle: boolean): number
   // Slight per-page variance factor from URL depth to avoid identical buckets.
   const depth = new URL(page.url).pathname.split('/').filter(Boolean).length;
   if (depth >= 3) score -= 1;
+  score += getStableJitter(page.url);
 
   return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+const GENERIC_ISSUE_FIX = 'Fix this issue based on SEO best practices for this page.';
+
+/** When aggregate or per-page AI did not produce a paste-ready line, use crawl-backed specifics (where/when). */
+function buildDeterministicIssueFix(
+  type: string,
+  page: CrawlPageResult,
+  description: string,
+  perf?: PageSpeedMetrics
+): string {
+  switch (type) {
+    case 'broken_links': {
+      const targets = page.brokenLinks.filter(Boolean).slice(0, 12);
+      if (!targets.length) return '';
+      const more = page.brokenLinks.length > 12 ? ` (+${page.brokenLinks.length - 12} more)` : '';
+      return `Page ${page.url} — broken internal hrefs to fix or remove: ${targets.join(' | ')}${more}. Restore moved URLs, fix typos, or point to the current live path.`;
+    }
+    case 'invalid_or_nonfunctional_link': {
+      const inv = page.invalidNavLinks || [];
+      if (!inv.length) return description;
+      const lines = inv
+        .slice(0, 8)
+        .map((x) => `${x.href} (${x.reason})`)
+        .join(' | ');
+      return `Page ${page.url} — repair or remove non-working links: ${lines}. Replace placeholders with real destinations or remove from primary content.`;
+    }
+    case 'images_without_alt': {
+      const imgs = (page.images || []).filter((i) => !String(i.alt || '').trim()).slice(0, 6);
+      if (imgs.length) {
+        const srcs = imgs.map((i) => i.src.replace(/\s+/g, ' ').slice(0, 100)).join(' | ');
+        return `${page.imagesWithoutAlt} image(s) missing ALT on ${page.url}. First assets to update: ${srcs}. Write short, accurate alt text (subject + role), not keyword lists.`;
+      }
+      return `${page.imagesWithoutAlt} image(s) on ${page.url} need descriptive alt attributes for accessibility and image search.`;
+    }
+    case 'slow_page': {
+      const bits = [`crawl/load ~${page.loadTimeMs}ms`];
+      if (perf?.lcpMs) bits.push(`LCP ~${perf.lcpMs}ms`);
+      if (perf?.inpMs) bits.push(`INP ~${perf.inpMs}ms`);
+      return `Performance on ${page.url}: ${bits.join('; ')}. Prioritize LCP image, cut blocking JS, improve caching/TTFB, then re-test in PageSpeed or CrUX.`;
+    }
+    case 'missing_canonical': {
+      const clean = page.url.split('#')[0].split('?')[0];
+      return `Add one canonical in <head> for ${page.url}, e.g. <link rel="canonical" href="${clean}" /> (adjust if your preferred URL uses params or locale paths).`;
+    }
+    default:
+      return '';
+  }
 }
 
 function pushIssue(
@@ -544,7 +1535,7 @@ function pushIssue(
     type,
     severity,
     description,
-    fix: aiFixes[type] || 'Fix this issue based on SEO best practices for this page.',
+    fix: aiFixes[type] || GENERIC_ISSUE_FIX,
   });
 }
 
@@ -556,7 +1547,7 @@ export async function analyzePagesWithAiWithSignals(
   pages: CrawlPageResult[],
   perfByUrl: Map<string, PageSpeedMetrics>
 ): Promise<Map<string, SeoPageReport>> {
-  const key = getOpenAiKey();
+  const key = await getOpenAiKeyAsync();
   const map = new Map<string, SeoPageReport>();
   const openAiClient = key ? new OpenAI({ apiKey: key }) : null;
 
@@ -724,13 +1715,25 @@ export async function analyzePagesWithAiWithSignals(
       const issueSpecific = pageFixMap.get(issue.type);
       if (issueSpecific) issue.fix = issueSpecific;
     }
+    const forceDeterministic = new Set(['broken_links', 'invalid_or_nonfunctional_link', 'images_without_alt']);
+    for (const issue of issues) {
+      if (forceDeterministic.has(issue.type)) {
+        const det = buildDeterministicIssueFix(issue.type, p, issue.description, perf);
+        if (det) issue.fix = det;
+      } else if (!issue.fix || issue.fix.trim() === GENERIC_ISSUE_FIX || issue.fix.trim().length < 28) {
+        const det = buildDeterministicIssueFix(issue.type, p, issue.description, perf);
+        if (det) issue.fix = det;
+      }
+    }
 
     const seoScore = computeSeoScore(p, isDuplicateTitle);
+    const keywordInsights = computeFreeKeywordInsights(p, seoScore, issueTypes);
     const r: SeoPageReport = {
       url: p.url,
       seoScore,
       scoreBreakdown: calcWeighted(p, issueTypes, isDuplicateTitle, perf),
-      keywordInsights: computeFreeKeywordInsights(p, seoScore, issueTypes),
+      keywordInsights,
+      recommendedWordCount: keywordInsights?.recommendedWordCount,
       backlinkInsights,
       performanceMetrics: perf
         ? {
@@ -756,13 +1759,27 @@ export async function analyzePagesWithAiWithSignals(
       internalLinkSuggestions: aggregateAi.internalLinkingTips?.slice(0, 2) ?? [
         'Add contextual internal links from related pages using descriptive anchor text.',
       ],
-      pasteReadyFixes: issueTypes
-        .filter((t) => pageFixMap.has(t))
-        .map((t) => ({
-          issueType: t,
-          issueSummary: t.replace(/_/g, ' '),
-          improvedContent: pageFixMap.get(t) as string,
-        })),
+      pasteReadyFixes: (() => {
+        const m = new Map<string, string>();
+        for (const row of pageAi?.pasteReadyFixes ?? []) {
+          const t = String(row.issueType ?? '').trim();
+          const fix = String(row.improvedContent ?? '').trim();
+          if (t && fix) m.set(t, fix);
+        }
+        for (const row of localEnhanced.pasteReadyFixes) {
+          if (!m.has(row.issueType)) m.set(row.issueType, row.improvedContent);
+        }
+        for (const iss of issues) {
+          if (iss.fix && iss.fix.trim()) m.set(iss.type, iss.fix);
+        }
+        return [...m.entries()]
+          .filter(([, v]) => v && v.trim())
+          .map(([issueType, improvedContent]) => ({
+            issueType,
+            issueSummary: issueType.replace(/_/g, ' '),
+            improvedContent,
+          }));
+      })(),
       improvedContent: {
         h1: String(pageAi?.improvedContent?.h1 ?? localEnhanced.improvedContent.h1 ?? '').trim() || undefined,
         title: String(pageAi?.improvedContent?.title ?? localEnhanced.improvedContent.title ?? '').trim() || undefined,

@@ -1,5 +1,5 @@
 import { config } from '../config/config';
-import { getSetting } from './db.service';
+import { getGoogleApiKey } from './secrets.service';
 import { logger } from '../utils/logger';
 
 export interface PageSpeedMetrics {
@@ -29,7 +29,7 @@ function readNumeric(obj: unknown, path: string[]): number | undefined {
 
 export async function fetchPageSpeedMetrics(url: string): Promise<PageSpeedMetrics | null> {
   try {
-    const configuredApiKey = getSetting('GOOGLE_API_KEY') || getSetting('GoogleAPIKey') || config.googleApiKey;
+    const configuredApiKey = getGoogleApiKey();
     const apiBase = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
       url
     )}&strategy=${encodeURIComponent(config.pageSpeedStrategy)}&category=PERFORMANCE&category=SEO&category=ACCESSIBILITY&category=BEST_PRACTICES`;

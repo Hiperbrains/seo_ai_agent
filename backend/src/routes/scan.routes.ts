@@ -26,6 +26,7 @@ import {
   getImageAltRouteMap,
   getLatestImageAltRouteMap,
   postStopScan,
+  deleteScan,
 } from '../controllers/scan.controller';
 
 export const scanRouter = Router();
@@ -47,7 +48,12 @@ scanRouter.get('/', (_req, res) => {
 scanRouter.post('/scan', (req, res) => {
   void postScan(req, res);
 });
-scanRouter.post('/scan/:scanId/stop', postStopScan);
+scanRouter.post('/scan/:scanId/stop', (req, res) => {
+  void postStopScan(req, res);
+});
+scanRouter.delete('/scans/:scanId', (req, res) => {
+  void deleteScan(req, res);
+});
 scanRouter.get('/reports/:scanId/pdf', (req, res) => {
   void getScanReportPdf(req, res);
 });
@@ -60,16 +66,30 @@ scanRouter.get('/reports/:scanId/backlink-analytics', getBacklinkAnalytics);
 scanRouter.get('/reports/latest/backlink-analytics', getLatestBacklinkAnalytics);
 scanRouter.get('/reports/:scanId/image-alt-route-map', getImageAltRouteMap);
 scanRouter.get('/reports/latest/image-alt-route-map', getLatestImageAltRouteMap);
-scanRouter.get('/reports', getReports);
+scanRouter.get('/reports', (req, res) => {
+  void getReports(req, res);
+});
 scanRouter.post('/send-report', (req, res) => {
   void postSendReport(req, res);
 });
-scanRouter.get('/domains', getDomains);
-scanRouter.post('/domains', postDomain);
-scanRouter.get('/dashboard-stats', getDashboardStats);
-scanRouter.get('/activity', getActivity);
-scanRouter.get('/settings', getSettings);
-scanRouter.put('/settings', putSettings);
+scanRouter.get('/domains', (req, res) => {
+  void getDomains(req, res);
+});
+scanRouter.post('/domains', (req, res) => {
+  void postDomain(req, res);
+});
+scanRouter.get('/dashboard-stats', (req, res) => {
+  void getDashboardStats(req, res);
+});
+scanRouter.get('/activity', (req, res) => {
+  void getActivity(req, res);
+});
+scanRouter.get('/settings', (req, res) => {
+  void getSettings(req, res);
+});
+scanRouter.put('/settings', (req, res) => {
+  void putSettings(req, res);
+});
 scanRouter.post('/settings/google-pagespeed/test', (req, res) => {
   void postGooglePageSpeedTest(req, res);
 });
@@ -91,4 +111,6 @@ scanRouter.post('/scans/:scanId/claude-pr', (req, res) => {
 scanRouter.post('/scans/:scanId/claude-pr/email', (req, res) => {
   void postScanClaudePrEmail(req, res);
 });
-scanRouter.get('/seo-trend', getSeoTrend);
+scanRouter.get('/seo-trend', (req, res) => {
+  void getSeoTrend(req, res);
+});

@@ -1,6 +1,10 @@
 import PDFDocument from 'pdfkit';
 import { PassThrough } from 'stream';
-import type { SeoPageReport } from '../models/scan.model';
+import { getPublicAppUrl } from '../utils/brandAssets';
+import type {
+  SeoPageReport,
+} from '../models/scan.model';
+import type { IntelligenceReport } from './intelligenceReport.service';
 
 export interface SerpRankRow {
   pageUrl: string;
@@ -97,6 +101,22 @@ function softWrapForPdf(input: string): string {
     .replace(/([A-Za-z0-9]{45})(?=[A-Za-z0-9])/g, '$1 ');
 }
 
+/** Decode common HTML entities and normalize whitespace for PDF heading cells (avoids &#039; etc.). */
+function sanitizeHeadingForPdf(text: string): string {
+  return softWrapForPdf(
+    String(text || '')
+      .replace(/&#8217;|&#8216;|&#x2019;/gi, "'")
+      .replace(/&#8220;|&#8221;|&#x201c;|&#x201d;/gi, '"')
+      .replace(/&#038;|&amp;/gi, '&')
+      .replace(/&#039;|&#x27;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+}
+
 function displayUrl(url: string): string {
   if (url.length <= 110) return url;
   return `${url.slice(0, 72)} ... ${url.slice(-30)}`;
@@ -113,6 +133,42 @@ function clampScore(score: number): number {
   return Math.max(0, Math.min(100, score));
 }
 
+type PdfDoc = InstanceType<typeof PDFDocument>;
+
+function drawBrandedPdfHeader(doc: PdfDoc, title: string, subtitle: string): void {
+  const marginTop = (doc as unknown as { page: { margins?: { top: number } } }).page.margins?.top ?? 48;
+  const m = (doc as unknown as { page: { margins: { left: number; right: number } } }).page.margins;
+  const ml = m?.left ?? 36;
+  const mr = m?.right ?? 36;
+  const textWidth = doc.page.width - ml - mr;
+  const brand = 'AI SEO AGENT';
+
+  doc.x = ml;
+  doc.y = marginTop;
+  const yBrand = doc.y;
+
+  doc.font('Helvetica-Bold').fontSize(15).fillColor('#0f172a');
+  doc.text(brand, ml, doc.y, { width: textWidth, align: 'center', lineGap: 0 });
+
+  const appUrl = getPublicAppUrl();
+  if (appUrl) {
+    const bw = doc.widthOfString(brand);
+    const bx = ml + (textWidth - bw) / 2;
+    doc.link(bx, yBrand, bw, 20, appUrl);
+  }
+
+  doc.x = ml;
+  doc.moveDown(0.25);
+  doc.font('Helvetica').fontSize(20).fillColor('#0f172a');
+  doc.text(title, ml, doc.y, { width: textWidth, align: 'center', lineGap: 2 });
+  doc.x = ml;
+  doc.moveDown(0.35);
+  doc.fontSize(11).fillColor('#334155');
+  doc.text(subtitle, ml, doc.y, { width: textWidth, align: 'center', lineGap: 0 });
+  doc.x = ml;
+  doc.moveDown(0.75);
+}
+
 function keywordQuickAction(rep: SeoPageReport): string {
   const issueTypes = new Set(rep.issues.map((i) => i.type));
   if (issueTypes.has('missing_title')) return 'Add unique title with primary keyword near start.';
@@ -123,14 +179,14 @@ function keywordQuickAction(rep: SeoPageReport): string {
   return 'Strengthen keyword coverage across title, H1, and intro.';
 }
 
-/** Professional per-page audit (preferred). */
-export function buildScanReportPdfFromPageReports(
-  meta: ScanPdfMeta,
-  pageReports: Record<string, SeoPageReport>,
-  serpRows: SerpRankRow[] = []
-): Promise<Buffer> {
+/** Professional per-page audit from normalized intelligence report only. */
+export function renderPdf(intelligenceReport: IntelligenceReport): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 36, info: { Title: `SEO Report — ${meta.domain}` } });
+    console.assert(intelligenceReport.pages.length > 0, 'intelligenceReport.pages must not be empty');
+    console.assert(intelligenceReport.quickWins.length >= 3, 'intelligenceReport.quickWins must be >= 3');
+    console.assert(intelligenceReport.topOpportunities.length > 0, 'intelligenceReport.topOpportunities must not be empty');
+
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 36, info: { Title: 'SEO Report' } });
     const stream = new PassThrough();
     const chunks: Buffer[] = [];
     stream.on('data', (c: Buffer) => chunks.push(c));
@@ -139,42 +195,7 @@ export function buildScanReportPdfFromPageReports(
     doc.pipe(stream);
 
     const contentWidth = doc.page.width - 72;
-    const pages = Object.values(pageReports);
-
-    const avgScore = meta.seo_score_avg != null
-      ? meta.seo_score_avg
-      : pages.length
-        ? pages.reduce((s, p) => s + p.seoScore, 0) / pages.length
-        : 0;
-    const roundedAvg = Math.round(avgScore);
-    const status = healthStatus(roundedAvg);
-
-    const issueFrequency = new Map<string, number>();
-    const severityTotals = { high: 0, medium: 0, low: 0 };
-    const weightedTotals: number[] = [];
-    for (const rep of pages) {
-      if (rep.scoreBreakdown?.weightedTotal != null) weightedTotals.push(rep.scoreBreakdown.weightedTotal);
-      for (const iss of rep.issues) {
-        issueFrequency.set(iss.type, (issueFrequency.get(iss.type) || 0) + 1);
-        if (iss.severity === 'high') severityTotals.high += 1;
-        else if (iss.severity === 'medium') severityTotals.medium += 1;
-        else severityTotals.low += 1;
-      }
-    }
-    const topIssues = [...issueFrequency.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
-    const issueSeverity = (type: string): 'high' | 'medium' | 'low' =>
-      type === 'missing_h1' || type === 'missing_title' || type === 'missing_meta_description' || type === 'broken_links'
-        ? 'high'
-        : type === 'duplicate_title' || type === 'slow_page' || type === 'images_without_alt' || type === 'invalid_or_nonfunctional_link'
-          ? 'medium'
-          : 'low';
-
-    const hasIssue = (type: string): boolean => pages.some((p) => p.issues.some((i) => i.type === type));
-    const siteLift = (hasIssue('missing_h1') ? 8 : 0)
-      + ((hasIssue('duplicate_title') || hasIssue('missing_title')) ? 6 : 0)
-      + (hasIssue('low_word_count') ? 10 : 0)
-      + 4;
-    const estimatedSiteScore = clampScore(roundedAvg + siteLift);
+    const pages = intelligenceReport.pages;
 
     const leftX = 36;
 
@@ -200,29 +221,37 @@ export function buildScanReportPdfFromPageReports(
       opts?: { fontSize?: number; rowPadding?: number }
     ): void => {
       const x = leftX;
-      const fontSize = opts?.fontSize ?? 8;
+      const baseFontSize = opts?.fontSize ?? 8;
       const rowPadding = opts?.rowPadding ?? 3;
-      const totalW = columns.reduce((s, c) => s + c.width, 0);
+      const rawTotalW = columns.reduce((s, c) => s + c.width, 0);
+      const scale = rawTotalW > contentWidth ? contentWidth / rawTotalW : 1;
+      const fittedColumns = columns.map((c) => ({
+        ...c,
+        width: Math.max(56, Math.floor(c.width * scale)),
+      }));
+      const totalW = fittedColumns.reduce((s, c) => s + c.width, 0);
+      const fontSize = scale < 1 ? Math.max(6, baseFontSize - 1) : baseFontSize;
+      const headerFontSize = scale < 1 ? 7 : 8;
 
       const drawHeader = (): void => {
         ensureSpace(40);
         const y = doc.y;
         const maxHeaderTextH = Math.max(
-          ...columns.map((c) => doc.heightOfString(c.title, { width: c.width - 6, align: c.align || 'left' }))
+          ...fittedColumns.map((c) => doc.heightOfString(c.title, { width: c.width - 6, align: c.align || 'left' }))
         );
         const headerH = Math.max(22, maxHeaderTextH + 8);
         doc.rect(x, y, totalW, headerH).fillColor('#dbeafe').fill();
         let cx = x;
-        for (const c of columns) {
+        for (const c of fittedColumns) {
           doc
-            .fontSize(8)
+            .fontSize(headerFontSize)
             .fillColor('#0f172a')
             .text(c.title, cx + 3, y + 4, { width: c.width - 6, align: c.align || 'left' });
           cx += c.width;
         }
         cx = x;
-        for (let i = 0; i < columns.length - 1; i++) {
-          cx += columns[i].width;
+        for (let i = 0; i < fittedColumns.length - 1; i++) {
+          cx += fittedColumns[i].width;
           doc.moveTo(cx, y).lineTo(cx, y + headerH).strokeColor('#cbd5e1').stroke();
         }
         doc.y = y + headerH;
@@ -232,7 +261,7 @@ export function buildScanReportPdfFromPageReports(
 
       for (const row of rows) {
         const y = doc.y;
-        const heights = columns.map((c) =>
+        const heights = fittedColumns.map((c) =>
           doc.heightOfString(String(row[c.key] ?? ''), { width: c.width - 6, align: c.align || 'left' })
         );
         const rowH = Math.max(16, Math.max(...heights) + rowPadding * 2);
@@ -243,7 +272,7 @@ export function buildScanReportPdfFromPageReports(
         const ry = doc.y;
         doc.rect(x, ry, totalW, rowH).strokeColor('#e2e8f0').stroke();
         let cx = x;
-        for (const c of columns) {
+        for (const c of fittedColumns) {
           const txt = String(row[c.key] ?? '');
           doc.fontSize(fontSize).fillColor('#334155').text(txt, cx + 3, ry + rowPadding, {
             width: c.width - 6,
@@ -252,8 +281,8 @@ export function buildScanReportPdfFromPageReports(
           cx += c.width;
         }
         cx = x;
-        for (let i = 0; i < columns.length - 1; i++) {
-          cx += columns[i].width;
+        for (let i = 0; i < fittedColumns.length - 1; i++) {
+          cx += fittedColumns[i].width;
           doc.moveTo(cx, ry).lineTo(cx, ry + rowH).strokeColor('#e2e8f0').stroke();
         }
         doc.y = ry + rowH;
@@ -261,365 +290,796 @@ export function buildScanReportPdfFromPageReports(
       doc.moveDown(0.5);
     };
 
-    doc.fontSize(20).fillColor('#0f172a').text('SEO audit report', { align: 'center' });
-    doc.moveDown(0.4);
-    doc.fontSize(11).fillColor('#334155').text(`Domain: ${meta.domain}`, { align: 'center' });
-    doc.moveDown(0.8);
+    drawBrandedPdfHeader(
+      doc,
+      'SEO audit report',
+      `Pages analyzed: ${intelligenceReport.summary.pagesAnalyzed}`
+    );
 
-    sectionTitle('1. Executive Summary');
+    sectionTitle('1. Enhanced Executive Summary');
+    const overallVerdict =
+      intelligenceReport.summary.confidenceScore >= 80
+        ? 'Strong execution readiness with clear SEO gains.'
+        : intelligenceReport.summary.confidenceScore >= 65
+          ? 'Good readiness; focused execution required for consistent gains.'
+          : 'Needs tighter execution discipline before broad rollout.';
+    drawTable(
+      [
+        { key: 'metric', title: 'Overall Verdict', width: 240 },
+        { key: 'value', title: 'Summary', width: 460 },
+      ],
+      [
+        {
+          metric: 'Verdict',
+          value: `${overallVerdict} ${intelligenceReport.explanation.expectedOutcome}`.slice(0, 220),
+        },
+      ],
+      { fontSize: 9 }
+    );
     drawTable(
       [
         { key: 'metric', title: 'Metric', width: 240 },
         { key: 'value', title: 'Value', width: 460 },
       ],
       [
-        { metric: 'Domain', value: meta.domain },
-        { metric: 'Total Pages Scanned', value: meta.pages_count },
-        { metric: 'Average SEO Score', value: roundedAvg },
-        { metric: 'Overall SEO Health', value: status },
+        { metric: 'Total Pages Scanned', value: intelligenceReport.summary.pagesAnalyzed },
+        { metric: 'Current SEO Score', value: intelligenceReport.summary.currentScore },
+        { metric: 'Estimated SEO Score', value: intelligenceReport.summary.estimatedScore },
+        { metric: 'Improvement Delta', value: intelligenceReport.summary.improvement },
+        { metric: 'Confidence Score', value: intelligenceReport.summary.confidenceScore },
+        { metric: 'Total Issues', value: intelligenceReport.summary.totalIssues },
+        { metric: 'Technical Score', value: intelligenceReport.summary.breakdown.technicalScore },
+        { metric: 'Content Score', value: intelligenceReport.summary.breakdown.contentScore },
+        { metric: 'Keyword Score', value: intelligenceReport.summary.breakdown.keywordScore },
+        { metric: 'Link Score', value: intelligenceReport.summary.breakdown.linkScore },
+        { metric: 'Traffic Increase Prediction (%)', value: intelligenceReport.summary.impactPrediction.trafficIncreasePercent },
+        { metric: 'Ranking Improvement Estimate', value: intelligenceReport.summary.impactPrediction.rankingImprovementEstimate },
       ],
       { fontSize: 9 }
     );
+    const topThreeActions = intelligenceReport.decisions.slice(0, 3).map((d) => `${d.actionType} (${displayUrl(d.page)})`).join(' | ');
+    drawTable(
+      [
+        { key: 'metric', title: 'At-a-Glance', width: 240 },
+        { key: 'value', title: 'Value', width: 460 },
+      ],
+      [
+        { metric: 'Top 3 Actions', value: topThreeActions || '-' },
+        { metric: 'Quick Wins Count', value: intelligenceReport.quickWins.length },
+        { metric: 'Confidence', value: intelligenceReport.summary.confidenceScore },
+        { metric: 'Why This Matters', value: intelligenceReport.explanation.whyThisMatters },
+      ],
+      { fontSize: 9 }
+    );
+    line(
+      `Confidence explanation: Score ${intelligenceReport.summary.confidenceScore} reflects data completeness, keyword validity, and consistency of prioritized actions.`,
+      '#334155',
+      9
+    );
     doc.moveDown(0.25);
-    line('Main problems detected:');
-    if (topIssues.length === 0) line('- No major issues detected in this scan.');
-    if (topIssues.length > 0) {
+
+    sectionTitle('2. Top Actionable Improvements');
+    const effortLevel = (score: number): 'Low' | 'Medium' | 'High' =>
+      score >= 85 ? 'Low' : score >= 70 ? 'Medium' : 'High';
+    const immediateActions = [...intelligenceReport.decisions]
+      .filter((d) => d.actionConfidence.score >= 80 && d.priority === 'HIGH')
+      .slice(0, 3);
+    drawTable(
+      [
+        { key: 'metric', title: 'Immediate Actions (Next 24h)', width: 240 },
+        { key: 'value', title: 'Action', width: 460 },
+      ],
+      (immediateActions.length
+        ? immediateActions
+        : intelligenceReport.decisions.slice(0, 3)
+      ).map((d) => ({
+        metric: d.actionType,
+        value: `${displayUrl(d.page)} | Confidence ${d.actionConfidence.score} | ${d.expectedImpact}`.slice(0, 180),
+      })),
+      { fontSize: 9 }
+    );
+    drawTable(
+      [
+        { key: 'action', title: 'Action', width: 520 },
+        { key: 'impact', title: 'Impact', width: 90, align: 'center' },
+        { key: 'effort', title: 'Estimated Effort', width: 90, align: 'center' },
+      ],
+      intelligenceReport.scoreSimulation.scoreBreakdown.map((s) => ({
+        action: s.action,
+        impact: `+${s.impact}`,
+        effort: effortLevel(
+          Math.round(
+            intelligenceReport.executionPlan.reduce((n, e) => n + e.actionConfidence.score, 0) /
+              Math.max(1, intelligenceReport.executionPlan.length)
+          )
+        ),
+      })),
+      { fontSize: 9 }
+    );
+    drawTable(
+      [
+        { key: 'keyword', title: 'Top Opportunity Keyword', width: 280 },
+        { key: 'page', title: 'Target Page', width: 300 },
+        { key: 'score', title: 'Opportunity Score', width: 140, align: 'center' },
+      ],
+      intelligenceReport.topOpportunities.map((t) => ({
+        keyword: t.keyword,
+        page: displayUrl(t.targetPage),
+        score: t.opportunityScore,
+      })),
+      { fontSize: 8 }
+    );
+    drawTable(
+      [
+        { key: 'page', title: 'Quick Win Page', width: 230 },
+        { key: 'action', title: 'Action', width: 330 },
+        { key: 'change', title: 'Exact Change', width: 210 },
+      ],
+      intelligenceReport.quickWins.map((q) => ({
+        page: displayUrl(q.page),
+        action: q.action.slice(0, 100),
+        change: q.exactChange.slice(0, 90),
+      })),
+      { fontSize: 8 }
+    );
+
+    sectionTitle('3. Content & Heading Analysis');
+    const decisionPages = new Set(intelligenceReport.decisions.map((d) => d.page));
+    const stablePages = intelligenceReport.pages.filter(
+      (p) =>
+        p.issues.filter((i) => i.severity === 'HIGH' || i.severity === 'MEDIUM').length === 0 &&
+        !decisionPages.has(p.pageUrl)
+    );
+    if (stablePages.length) {
       drawTable(
         [
-          { key: 'issue', title: 'Issue', width: 170 },
-          { key: 'affected', title: 'Pages Affected', width: 120, align: 'center' },
-          { key: 'severity', title: 'Severity', width: 120, align: 'center' },
-          { key: 'impact', title: 'Impact', width: 290 },
+          { key: 'page', title: 'Stable Page', width: 460 },
+          { key: 'score', title: 'SEO Score', width: 120, align: 'center' },
+          { key: 'note', title: 'Status', width: 120, align: 'center' },
         ],
-        topIssues.map(([type, count]) => {
-          const sev = issueSeverity(type);
-          return {
-            issue: issueDisplayName(type),
-            affected: count,
-            severity: severityWithIndicator(sev),
-            impact: issueImpact(type),
-          };
-        }),
+        stablePages.slice(0, 8).map((p) => ({
+          page: displayUrl(p.pageUrl),
+          score: p.seoScore,
+          note: 'Stable',
+        })),
         { fontSize: 8 }
       );
     }
-    line(`Estimated score after fix: ${estimatedSiteScore}`);
-
-    sectionTitle('2. Issue Severity Legend');
     drawTable(
       [
-        { key: 'severity', title: 'Severity', width: 180 },
-        { key: 'meaning', title: 'Meaning', width: 520 },
+        { key: 'page', title: 'Page', width: 160 },
+        { key: 'wc', title: 'Words', width: 64, align: 'center' },
+        { key: 'rwc', title: 'Recommended', width: 84, align: 'center' },
+        { key: 'coverage', title: 'Coverage', width: 72, align: 'center' },
+        { key: 'h1', title: 'Current H1', width: 200 },
+        { key: 'h1opt', title: 'Optimized', width: 64, align: 'center' },
+        { key: 'suggested', title: 'Suggested H1', width: 120 + (contentWidth - 764) },
       ],
+      intelligenceReport.pages.map((p) => ({
+        page: displayUrl(p.pageUrl),
+        wc: p.contentAnalysis.wordCount,
+        rwc: p.contentAnalysis.recommendedWordCount,
+        coverage: `${p.contentAnalysis.keywordCoverage}%`,
+        h1: sanitizeHeadingForPdf(p.headingAnalysis.currentH1),
+        h1opt: p.headingAnalysis.isOptimized ? 'YES' : 'NO',
+        suggested: sanitizeHeadingForPdf(p.headingAnalysis.suggestedH1),
+      })),
+      { fontSize: 8 }
+    );
+    drawTable(
       [
-        { severity: 'HIGH', meaning: 'Critical ranking issue' },
-        { severity: 'MEDIUM', meaning: 'Important improvement' },
-        { severity: 'LOW', meaning: 'Minor optimization' },
-      ]
+        { key: 'keyword', title: 'Keyword', width: 220 },
+        { key: 'intent', title: 'Intent', width: 110, align: 'center' },
+        { key: 'target', title: 'Target Page', width: 230 },
+        { key: 'priority', title: 'Priority', width: 80, align: 'center' },
+        { key: 'opportunity', title: 'Opportunity', width: 80, align: 'center' },
+      ],
+      intelligenceReport.keywordStrategy.primaryKeywords.map((k) => ({
+        keyword: k.keyword,
+        intent: k.intent.toUpperCase(),
+        target: displayUrl(k.targetPage),
+        priority: k.priorityScore,
+        opportunity: k.opportunityScore,
+      })),
+      { fontSize: 8 }
+    );
+    line(
+      `Keyword Buckets -> Primary: ${intelligenceReport.keywordStrategy.primaryKeywords.length}, Long-tail: ${intelligenceReport.keywordStrategy.longTailKeywords.length}, Blog: ${intelligenceReport.keywordStrategy.blogKeywords.length}, Comparison: ${intelligenceReport.keywordStrategy.comparisonKeywords.length}`,
+      '#334155',
+      9
+    );
+    doc.moveDown(0.2);
+    line(
+      `Keyword Clusters: ${intelligenceReport.keywordClusters.map((c) => `${c.cluster} (${c.count})`).slice(0, 6).join(', ') || '-'}`,
+      '#334155',
+      9
+    );
+    doc.moveDown(0.2);
+    line(
+      `Competitor Gaps: ${intelligenceReport.competitorKeywordGaps.map((g) => g.keyword).slice(0, 8).join(', ') || '-'}`,
+      '#334155',
+      9
+    );
+    doc.moveDown(0.3);
+
+    sectionTitle('4. Keyword Mapping (Standalone)');
+    const keywordIntentMap = new Map(
+      intelligenceReport.keywordStrategy.primaryKeywords.map((k) => [k.keyword, k.intent.toUpperCase()])
+    );
+    drawTable(
+      [
+        { key: 'keyword', title: 'Keyword', width: 240 },
+        { key: 'intent', title: 'Intent', width: 90, align: 'center' },
+        { key: 'target', title: 'Mapped Page', width: 250 },
+        { key: 'reason', title: 'Reason', width: 120 + (contentWidth - 580) },
+      ],
+      intelligenceReport.keywordMapping.map((m) => ({
+        keyword: m.keyword,
+        intent: keywordIntentMap.get(m.keyword) || '-',
+        target: displayUrl(m.targetPage),
+        reason: m.reason.slice(0, 100),
+      })),
+      { fontSize: 8 }
     );
 
-    sectionTitle('3. Website Issue Distribution');
+    sectionTitle('5. Image SEO Analysis');
     drawTable(
       [
-        { key: 'issue', title: 'Issue', width: 360 },
-        { key: 'affected', title: 'Pages Affected', width: 170, align: 'center' },
-        { key: 'severity', title: 'Severity', width: 170, align: 'center' },
+        { key: 'page', title: 'Page', width: 140 },
+        { key: 'image', title: 'Image', width: 150 },
+        { key: 'alt', title: 'Alt Text', width: 90 },
+        { key: 'ctx', title: 'Context', width: 70, align: 'center' },
+        { key: 'conv', title: 'Conversion', width: 70, align: 'center' },
+        { key: 'type', title: 'Type', width: 70, align: 'center' },
+        { key: 'issue', title: 'Issue', width: 100 },
+        { key: 'impr', title: 'Improvement', width: 80 + (contentWidth - 690) },
       ],
-      [...issueFrequency.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 20)
-        .map(([type, count]) => ({
-          issue: issueDisplayName(type),
-          affected: count,
-          severity: severityWithIndicator(issueSeverity(type)),
+      intelligenceReport.pages
+        .flatMap((p) =>
+          p.imageAnalysis.map((img) => ({
+            page: displayUrl(p.pageUrl),
+            image: displayUrl(img.imageUrl),
+            alt: (img.altText || '-').slice(0, 35),
+            ctx: `${img.contextMatchScore}%`,
+            conv: img.conversionImpact,
+            type: img.suggestedImageType,
+            issue: img.issue,
+            impr: img.improvement.slice(0, 70),
+          }))
+        )
+        .slice(0, 12),
+      { fontSize: 7 }
+    );
+
+    sectionTitle('6. Technical SEO Issues');
+    drawTable(
+      [
+        { key: 'type', title: 'Issue Type', width: 170 },
+        { key: 'page', title: 'Page', width: 210 },
+        { key: 'severity', title: 'Severity', width: 80, align: 'center' },
+        { key: 'impact', title: 'Impact', width: 140 },
+        { key: 'fix', title: 'Fix Suggestion', width: 120 + (contentWidth - 600) },
+      ],
+      intelligenceReport.technicalIssues.map((i) => ({
+        type: i.type,
+        page: displayUrl(i.page),
+        severity: i.severity,
+        impact: i.impact.slice(0, 60),
+        fix: i.fixSuggestion.slice(0, 95),
+      })),
+      { fontSize: 8 }
+    );
+
+    sectionTitle('7. Internal Linking Plan');
+    drawTable(
+      [
+        { key: 'from', title: 'From', width: 230 },
+        { key: 'to', title: 'To', width: 230 },
+        { key: 'anchor', title: 'Anchor Text', width: 160 },
+        { key: 'reason', title: 'Reason', width: 80 + (contentWidth - 620) },
+      ],
+      intelligenceReport.internalLinks.map((l) => ({
+        from: displayUrl(l.from),
+        to: displayUrl(l.to),
+        anchor: l.anchorText.slice(0, 50),
+        reason: l.reason.slice(0, 90),
+      })),
+      { fontSize: 8 }
+    );
+
+    sectionTitle('8. New Page Opportunities');
+    drawTable(
+      [
+        { key: 'keyword', title: 'Keyword', width: 170 },
+        { key: 'url', title: 'URL', width: 170 },
+        { key: 'intent', title: 'Intent', width: 90, align: 'center' },
+        { key: 'priority', title: 'Priority', width: 90, align: 'center' },
+        { key: 'reason', title: 'Reason', width: 140 + (contentWidth - 520) },
+        { key: 'brief', title: 'Brief', width: 160 },
+      ],
+      intelligenceReport.newPageSuggestions.map((n) => ({
+        keyword: n.keyword,
+        url: n.url,
+        intent: n.intent,
+        priority: n.priority,
+        reason: n.reason.slice(0, 70),
+        brief: `${n.contentBrief.headings.join(' | ')} (${n.contentBrief.wordCount})`.slice(0, 90),
+      })),
+      { fontSize: 8 }
+    );
+
+    sectionTitle('9. AI Decision Engine Output');
+    drawTable(
+      [
+        { key: 'action', title: 'Action', width: 88 },
+        { key: 'page', title: 'Page', width: 152 },
+        { key: 'primaryKeyword', title: 'Primary keyword', width: 128 },
+        { key: 'priority', title: 'Priority', width: 72, align: 'center' },
+        { key: 'impactType', title: 'Impact Type', width: 82, align: 'center' },
+        { key: 'confidence', title: 'Confidence', width: 72, align: 'center' },
+        { key: 'reason', title: 'Reason', width: 108 },
+        { key: 'expected', title: 'Expected Impact', width: 120 + (contentWidth - 804) },
+      ],
+      intelligenceReport.decisions.map((d) => ({
+        action: d.actionType,
+        page: displayUrl(d.page),
+        primaryKeyword: (d.primaryKeyword || '—').slice(0, 80),
+        priority: d.priority,
+        impactType: d.impactType,
+        confidence: d.actionConfidence.score,
+        reason: d.reason.slice(0, 55),
+        expected: d.expectedImpact,
+      })),
+      { fontSize: 8 }
+    );
+    drawTable(
+      [
+        { key: 'group', title: 'Decision Group', width: 220 },
+        { key: 'count', title: 'Count', width: 120, align: 'center' },
+        { key: 'actions', title: 'Actions', width: 360 },
+      ],
+      [
+        { group: 'highImpact', count: intelligenceReport.decisionGroups.highImpact.length, actions: intelligenceReport.decisionGroups.highImpact.map((d) => d.actionType).join(', ') || '-' },
+        { group: 'quickWins', count: intelligenceReport.decisionGroups.quickWins.length, actions: intelligenceReport.decisionGroups.quickWins.map((d) => d.actionType).join(', ') || '-' },
+        { group: 'contentImprovements', count: intelligenceReport.decisionGroups.contentImprovements.length, actions: intelligenceReport.decisionGroups.contentImprovements.map((d) => d.actionType).join(', ') || '-' },
+        { group: 'technicalFixes', count: intelligenceReport.decisionGroups.technicalFixes.length, actions: intelligenceReport.decisionGroups.technicalFixes.map((d) => d.actionType).join(', ') || '-' },
+      ],
+      { fontSize: 8 }
+    );
+    const skippedDecisions = intelligenceReport.decisions.filter((d) => d.actionConfidence.score <= 70 || d.priority === 'LOW');
+    drawTable(
+      [
+        { key: 'action', title: 'Skipped Action', width: 120 },
+        { key: 'page', title: 'Page', width: 150 },
+        { key: 'primaryKeyword', title: 'Primary keyword', width: 110 },
+        { key: 'skipReason', title: 'Skip Reason', width: 200 },
+        { key: 'reason', title: 'Decision Reason', width: 150 },
+        { key: 'confidence', title: 'Confidence', width: 74, align: 'center' },
+      ],
+      (
+        skippedDecisions.length
+          ? skippedDecisions
+          : [
+              {
+                actionType: '-',
+                page: '-',
+                primaryKeyword: '—',
+                reason: 'No skipped decisions',
+                actionConfidence: { score: 0 },
+              },
+            ]
+      ).map((d: any) => ({
+        action: d.actionType,
+        page: displayUrl(d.page),
+        primaryKeyword: (d.primaryKeyword || '—').slice(0, 70),
+        skipReason: d.actionConfidence.score <= 70 ? 'Low confidence (<=70)' : d.priority === 'LOW' ? 'Low priority' : '-',
+        reason: d.reason.slice(0, 90),
+        confidence: d.actionConfidence.score,
+      })),
+      { fontSize: 8 }
+    );
+
+    sectionTitle('10. Execution plan (handoff to dev / content)');
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'This section is a draft work list. It does not change your live site. Engineers often ship similar edits as GitHub "pull requests" (PRs)—groups of file updates with a short description. Content and SEO leads should still read each "before → after" snippet for tone and accuracy.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        `Execution mode — ${intelligenceReport.executionMode.toUpperCase()}: ` +
+          (intelligenceReport.executionMode === 'preview'
+            ? 'Preview only. Nothing is auto-applied; use the tables below as tickets or copy-paste instructions.'
+            : 'Execute-capable build: automation may apply approved changes—confirm with your admin.')
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.45);
+    const executionFiles = new Set(intelligenceReport.executionPlan.map((e) => e.filePath)).size;
+    const executionChanges = intelligenceReport.executionPlan.reduce((n, e) => n + e.changes.length, 0);
+    const blockedActionsCount = skippedDecisions.length;
+    const safeActionsCount = intelligenceReport.executionPlan.length;
+    const avgConfidence = intelligenceReport.executionPlan.length
+      ? Math.round(
+          intelligenceReport.executionPlan.reduce((n, e) => n + e.actionConfidence.score, 0) /
+            Math.max(1, intelligenceReport.executionPlan.length)
+        )
+      : 0;
+    const prGroupCount =
+      intelligenceReport.prGroups.metaFixes.length +
+      intelligenceReport.prGroups.contentUpdates.length +
+      intelligenceReport.prGroups.internalLinks.length +
+      intelligenceReport.prGroups.technicalFixes.length;
+    const readinessStatus = blockedActionsCount === 0 && avgConfidence >= 80 ? 'READY' : avgConfidence >= 70 ? 'REVIEW_REQUIRED' : 'NOT_READY';
+    const readinessPlain =
+      readinessStatus === 'READY'
+        ? 'Low friction: spot-check wording, then ship.'
+        : readinessStatus === 'REVIEW_REQUIRED'
+          ? 'Have SEO or a content owner approve each snippet before publishing.'
+          : 'Treat as exploratory—several items need stronger data or rewrites first.';
+    drawTable(
+      [
+        { key: 'metric', title: 'What this means (managers)', width: 260 },
+        { key: 'value', title: 'Detail', width: 440 },
+      ],
+      [
+        {
+          metric: 'Publishing readiness (code)',
+          value: `${readinessStatus} — ${readinessPlain}`,
+        },
+        {
+          metric: 'Pages with an approved edit batch',
+          value: `${safeActionsCount} — each row is one URL where we suggest concrete title / meta / H1 (or similar) replacements below.`,
+        },
+        {
+          metric: 'Suggestions on hold for now',
+          value: `${blockedActionsCount} — ideas we still show in section 9 but did not bundle here (often lower confidence or lower priority).`,
+        },
+        {
+          metric: 'Average certainty for bundled edits (0–100)',
+          value: `${avgConfidence} — higher usually means clearer crawl signals and safer, smaller text swaps (not a Google ranking guarantee).`,
+        },
+      ],
+      { fontSize: 9 }
+    );
+    drawTable(
+      [
+        { key: 'metric', title: 'Scope of work', width: 260 },
+        { key: 'value', title: 'Detail', width: 440 },
+      ],
+      [
+        {
+          metric: 'Total on-page text or tag tweaks',
+          value: `${executionChanges} — individual before/after lines listed in the next table.`,
+        },
+        {
+          metric: 'Content files touched (approx.)',
+          value: `${executionFiles} — unique file paths referenced for engineering handoff.`,
+        },
+        {
+          metric: 'Suggested PR batches',
+          value: `${prGroupCount} — logical groupings (e.g. meta-only vs body) so reviews stay small.`,
+        },
+      ],
+      { fontSize: 9 }
+    );
+    const riskSeoOnly = intelligenceReport.executionPlan.filter((e) => e.impactType === 'SEO_ONLY').length;
+    const riskContent = intelligenceReport.executionPlan.filter((e) => e.impactType === 'CONTENT').length;
+    const riskRiskyBlocked = skippedDecisions.filter((d) => d.impactType === 'RISKY').length;
+    drawTable(
+      [
+        { key: 'metric', title: 'Change type (for reviewers)', width: 260 },
+        { key: 'value', title: 'Detail', width: 440 },
+      ],
+      [
+        {
+          metric: 'Tags & snippets only (titles, meta, H1, …)',
+          value: `${riskSeoOnly} — typically quick copy review; less layout risk.`,
+        },
+        {
+          metric: 'Larger body or section rewrites',
+          value: `${riskContent} — needs editorial time if any appear.`,
+        },
+        {
+          metric: 'Blocked risky automation',
+          value: `${riskRiskyBlocked} — broad replacements we refused to auto-suggest.`,
+        },
+      ],
+      { fontSize: 9 }
+    );
+    doc.moveDown(0.15);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'Suggested edits (for approvers): each row is one field on a page. Selector = which HTML element (e.g. title, H1). Before / After = current vs proposed text. SEO_ONLY means tag or snippet edits, not a full page redesign.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.25);
+    const topicRows = intelligenceReport.executionPlan.map((e) => ({
+      page: displayUrl(e.page),
+      fit: e.topicAlignmentScore,
+      note: softWrapForPdf(e.topicReviewerWarning || 'No major auto-detected mismatch vs URL/title/H1 (still verify tone).').slice(0, 200),
+    }));
+    drawTable(
+      [
+        { key: 'page', title: 'Page', width: 200 },
+        { key: 'fit', title: 'Topic fit 0–100', width: 90, align: 'center' },
+        { key: 'note', title: 'Topic check (auto)', width: 120 + (contentWidth - 410) },
+      ],
+      topicRows.length ? topicRows : [{ page: '—', fit: '—', note: 'No bundled edits for this export.' }],
+      { fontSize: 7 }
+    );
+    if (intelligenceReport.executionPlan.some((e) => e.topicReviewerWarning)) {
+      doc.moveDown(0.2);
+      doc.fontSize(8).fillColor('#b45309').text(
+        softWrapForPdf(
+          'At least one URL above shows weak overlap between the target keyword and the live page topic. Treat title/meta/H1/intro suggestions as draft ideas, not final copy.'
+        ),
+        leftX,
+        doc.y,
+        { width: contentWidth, align: 'left' }
+      );
+      doc.moveDown(0.35);
+    } else {
+      doc.moveDown(0.35);
+    }
+    drawTable(
+      [
+        { key: 'page', title: 'Page', width: 130 },
+        { key: 'file', title: 'File', width: 130 },
+        { key: 'impact', title: 'Impact', width: 70, align: 'center' },
+        { key: 'conf', title: 'Confidence', width: 70, align: 'center' },
+        { key: 'selector', title: 'Selector', width: 100 },
+        { key: 'diff', title: 'Diff', width: 60, align: 'center' },
+        { key: 'before', title: 'Before', width: 120 },
+        { key: 'after', title: 'After', width: 120 + (contentWidth - 800) },
+      ],
+      intelligenceReport.executionPlan.flatMap((e) =>
+        e.changes.map((c) => ({
+          page: displayUrl(e.page),
+          file: e.filePath.slice(0, 30),
+          impact: e.impactType,
+          conf: e.actionConfidence.score,
+          selector: c.selector.slice(0, 24),
+          diff: c.diffPreview.diffType,
+          before: `- ${c.diffPreview.before.slice(0, 33)}`,
+          after: `+ ${c.diffPreview.after.slice(0, 33)}`,
         }))
+      ),
+      { fontSize: 7 }
     );
-    ensureSpace(250);
-    line('Issue Severity Distribution');
-    const totalIssues = Math.max(1, severityTotals.high + severityTotals.medium + severityTotals.low);
-    const pieCx = leftX + 130;
-    const pieCy = doc.y + 92;
-    const pieR = 72;
-    const slices = [
-      { key: 'high', label: 'HIGH -> High Severity', count: severityTotals.high, color: '#ef4444' },
-      { key: 'medium', label: 'MEDIUM -> Medium Severity', count: severityTotals.medium, color: '#f59e0b' },
-      { key: 'low', label: 'LOW -> Low Severity', count: severityTotals.low, color: '#eab308' },
-    ];
-    let start = -Math.PI / 2;
-    for (const s of slices) {
-      if (s.count <= 0) continue;
-      const angle = (s.count / totalIssues) * Math.PI * 2;
-      const steps = Math.max(8, Math.ceil((angle / (Math.PI * 2)) * 64));
-      doc.moveTo(pieCx, pieCy);
-      for (let i = 0; i <= steps; i++) {
-        const t = start + (angle * i) / steps;
-        doc.lineTo(pieCx + pieR * Math.cos(t), pieCy + pieR * Math.sin(t));
-      }
-      doc.lineTo(pieCx, pieCy).fillColor(s.color).fill();
-      start += angle;
-    }
-    doc.circle(pieCx, pieCy, pieR).lineWidth(1).strokeColor('#cbd5e1').stroke();
-
-    const legendX = leftX + 250;
-    let legendY = doc.y + 28;
-    for (const s of slices) {
-      const pct = Math.round((s.count / totalIssues) * 100);
-      doc.rect(legendX, legendY, 10, 10).fillColor(s.color).fill();
-      doc
-        .font('Helvetica')
-        .fontSize(9)
-        .fillColor('#334155')
-        .text(`${s.label}: ${s.count} pages (${pct}%)`, legendX + 16, legendY - 1, { width: contentWidth - (legendX - leftX) - 16 });
-      legendY += 20;
-    }
-    doc.y = Math.max(pieCy + pieR + 12, legendY + 8);
-
-    sectionTitle('4. Page Level SEO Analysis');
-    const pageRows = pages.map((rep, idx) => {
-      const high = rep.issues.filter((i) => i.severity === 'high').length;
-      const med = rep.issues.filter((i) => i.severity === 'medium').length;
-      const low = rep.issues.filter((i) => i.severity === 'low').length;
-      const pageLift = (rep.issues.some((i) => i.type === 'missing_h1') ? 5 : 0)
-        + (rep.issues.some((i) => i.type === 'duplicate_title' || i.type === 'missing_title') ? 3 : 0)
-        + (rep.issues.some((i) => i.type === 'low_word_count') ? 7 : 0);
-      const improvedTitle = rep.improvedContent?.title || rep.suggestedTitle || 'n/a';
-      const improvedH1 = rep.improvedContent?.h1 || 'n/a';
-      const suggestion = (rep.improvedContent?.bodyCopy || rep.contentImprovements?.[0] || 'Add page-specific content for user intent.').slice(0, 95);
-      const keyword = rep.keywordInsights?.targetKeyword || 'n/a';
-      const lcp = rep.performanceMetrics?.lcpMs != null ? `${Math.round(rep.performanceMetrics.lcpMs)} ms` : 'n/a';
-      const summary = `Focus ${keyword}; H:${high}/M:${med}/L:${low}; improve on-page depth and intent clarity.`;
+    drawTable(
+      [
+        { key: 'group', title: 'PR Group', width: 220 },
+        { key: 'count', title: 'Count', width: 120, align: 'center' },
+        { key: 'ids', title: 'IDs', width: 360 },
+      ],
+      [
+        { group: 'metaFixes', count: intelligenceReport.prGroups.metaFixes.length, ids: intelligenceReport.prGroups.metaFixes.map((g) => g.groupId).join(', ') || '-' },
+        { group: 'contentUpdates', count: intelligenceReport.prGroups.contentUpdates.length, ids: intelligenceReport.prGroups.contentUpdates.map((g) => g.groupId).join(', ') || '-' },
+        { group: 'internalLinks', count: intelligenceReport.prGroups.internalLinks.length, ids: intelligenceReport.prGroups.internalLinks.map((g) => g.groupId).join(', ') || '-' },
+        { group: 'technicalFixes', count: intelligenceReport.prGroups.technicalFixes.length, ids: intelligenceReport.prGroups.technicalFixes.map((g) => g.groupId).join(', ') || '-' },
+      ],
+      { fontSize: 8 }
+    );
+    const totalSimulationImpact = intelligenceReport.scoreSimulation.scoreBreakdown.reduce(
+      (s, i) => s + Number(i.impact || 0),
+      0
+    );
+    const groupRows = [
+      { group: 'metaFixes', rows: intelligenceReport.prGroups.metaFixes },
+      { group: 'contentUpdates', rows: intelligenceReport.prGroups.contentUpdates },
+      { group: 'internalLinks', rows: intelligenceReport.prGroups.internalLinks },
+      { group: 'technicalFixes', rows: intelligenceReport.prGroups.technicalFixes },
+    ].map((g) => {
+      const groupChanges = g.rows.reduce((n, r) => n + r.changes.length, 0);
+      const filesAffected = new Set(g.rows.map((r) => r.filePath)).size;
+      const estimatedImpact = executionChanges > 0
+        ? Math.round((groupChanges / executionChanges) * totalSimulationImpact * 10) / 10
+        : 0;
       return {
-        idx: idx + 1,
-        url: displayUrl(rep.url),
-        score: rep.seoScore,
-        keyword,
-        rank: `${rep.keywordInsights?.rankingProbability ?? 0}%`,
-        lcp,
-        high,
-        medium: med,
-        low,
-        title: improvedTitle.slice(0, 54),
-        h1: improvedH1.slice(0, 42),
-        content: suggestion,
-        estimated: clampScore(rep.seoScore + pageLift),
-        summary: summary.slice(0, 85),
+        group: g.group,
+        impact: `+${estimatedImpact}`,
+        files: filesAffected,
       };
     });
     drawTable(
       [
-        { key: 'idx', title: '#', width: 22, align: 'center' },
-        { key: 'url', title: 'Page URL', width: 100 },
-        { key: 'score', title: 'SEO Score', width: 42, align: 'center' },
-        { key: 'keyword', title: 'Target Keyword', width: 66 },
-        { key: 'rank', title: 'Rank %', width: 44, align: 'center' },
-        { key: 'lcp', title: 'LCP', width: 44, align: 'center' },
-        { key: 'high', title: 'High', width: 28, align: 'center' },
-        { key: 'medium', title: 'Med', width: 34, align: 'center' },
-        { key: 'low', title: 'Low', width: 26, align: 'center' },
-        { key: 'title', title: 'AI Title', width: 74 },
-        { key: 'h1', title: 'AI H1', width: 58 },
-        { key: 'content', title: 'AI Content', width: 82 },
-        { key: 'estimated', title: 'Est', width: 42, align: 'center' },
-        { key: 'summary', title: 'Page Summary', width: 88 },
+        { key: 'group', title: 'PR Group', width: 220 },
+        { key: 'impact', title: 'Estimated Score Impact', width: 220, align: 'center' },
+        { key: 'files', title: 'Files Affected', width: 260, align: 'center' },
       ],
-      pageRows,
-      { fontSize: 7, rowPadding: 2 }
+      groupRows,
+      { fontSize: 8 }
     );
-
-    const avgOnPageScore = pages.length
-      ? Math.round(pages.reduce((s, p) => s + (p.scoreBreakdown?.onPage ?? p.seoScore), 0) / pages.length)
-      : 0;
-    const avgTechnicalScore = pages.length
-      ? Math.round(pages.reduce((s, p) => s + (p.scoreBreakdown?.technical ?? 0), 0) / pages.length)
-      : 0;
-    const onPageIssueCount = pages.reduce(
-      (n, p) =>
-        n +
-        p.issues.filter((i) =>
-          [
-            'missing_title',
-            'missing_meta_description',
-            'missing_h1',
-            'multiple_h1',
-            'duplicate_title',
-            'low_word_count',
-            'images_without_alt',
-            'missing_canonical',
-          ].includes(i.type)
-        ).length,
-      0
-    );
-    const avgOffPageScore = pages.length
-      ? Math.round(
-          pages.reduce((s, p) => s + (p.backlinkInsights?.backlinkQualityScore ?? p.scoreBreakdown?.backlinks ?? 0), 0) /
-            pages.length
-        )
-      : 0;
-    const totalInternalReferrals = pages.reduce((n, p) => n + (p.backlinkInsights?.internalReferringPages ?? 0), 0);
-    const totalExternalDomains = pages.reduce((n, p) => n + (p.backlinkInsights?.uniqueExternalDomainsLinked ?? 0), 0);
-
-    sectionTitle('5. On-page SEO Analysis');
+    const changeDensityRows = [...intelligenceReport.executionPlan]
+      .map((e) => ({ page: displayUrl(e.page), changes: e.changes.length }))
+      .sort((a, b) => b.changes - a.changes)
+      .slice(0, 5);
     drawTable(
       [
-        { key: 'metric', title: 'Metric', width: 260 },
-        { key: 'value', title: 'Value', width: 440 },
+        { key: 'page', title: 'Top Page by Change Density', width: 500 },
+        { key: 'changes', title: 'Changes', width: 200, align: 'center' },
       ],
-      [
-        { metric: 'Average On-page Score', value: avgOnPageScore },
-        { metric: 'Average Technical Score', value: avgTechnicalScore },
-        { metric: 'On-page Issue Count', value: onPageIssueCount },
-        {
-          metric: 'Priority',
-          value: 'Fix title/meta/H1/content depth/canonical/image ALT issues first for faster ranking impact.',
-        },
-      ],
-      { fontSize: 9 }
+      changeDensityRows.length ? changeDensityRows : [{ page: '-', changes: 0 }],
+      { fontSize: 8 }
     );
-
-    sectionTitle('6. Off-page SEO Analysis (Free-mode)');
     drawTable(
       [
-        { key: 'metric', title: 'Metric', width: 260 },
-        { key: 'value', title: 'Value', width: 440 },
+        { key: 'prId', title: 'PR ID', width: 140 },
+        { key: 'status', title: 'Status', width: 120, align: 'center' },
+        { key: 'expected', title: 'Expected Impact', width: 280 },
+        { key: 'actual', title: 'Actual Impact', width: 180 },
       ],
-      [
-        { metric: 'Average Off-page Score', value: avgOffPageScore },
-        { metric: 'Internal Referring Links', value: totalInternalReferrals },
-        { metric: 'Unique External Domains Linked', value: totalExternalDomains },
-        {
-          metric: 'Note',
-          value: 'This is free-mode off-page insight from crawl graph signals; not full web backlink intelligence.',
-        },
-      ],
-      { fontSize: 9 }
-    );
-
-    sectionTitle('7. Top Keyword Opportunities (Free Algorithm)');
-    const opportunityRows = pages
-      .map((rep) => ({
-        url: displayUrl(rep.url),
-        keyword: rep.keywordInsights?.targetKeyword || 'n/a',
-        opportunity: rep.keywordInsights?.opportunityScore ?? 0,
-        trendBoost: rep.keywordInsights?.trendBoost ?? 0,
-        placement: rep.keywordInsights?.keywordPlacementScore ?? 0,
-        rankProb: rep.keywordInsights?.rankingProbability ?? 0,
-        action: keywordQuickAction(rep),
-      }))
-      .sort((a, b) => b.opportunity - a.opportunity)
-      .slice(0, 10);
-    drawTable(
-      [
-        { key: 'url', title: 'Page URL', width: 160 },
-        { key: 'keyword', title: 'Target Keyword', width: 130 },
-        { key: 'opportunity', title: 'Opportunity', width: 80, align: 'center' },
-        { key: 'trendBoost', title: 'Trend Boost', width: 80, align: 'center' },
-        { key: 'placement', title: 'Placement', width: 80, align: 'center' },
-        { key: 'rankProb', title: 'Rank %', width: 65, align: 'center' },
-        { key: 'action', title: 'Quick Action', width: 165 },
-      ],
-      opportunityRows,
-      { fontSize: 8, rowPadding: 3 }
-    );
-
-    sectionTitle('8. Live Google Rank Positions (SerpAPI)');
-    if (serpRows.length === 0) {
-      drawTable(
-        [
-          { key: 'metric', title: 'Metric', width: 260 },
-          { key: 'value', title: 'Value', width: 440 },
-        ],
-        [
-          { metric: 'Status', value: 'Live SERP rank data unavailable for this report.' },
-          { metric: 'Reason', value: 'SERPAPI_KEY missing, API limit reached, or no keywords were eligible.' },
-        ],
-        { fontSize: 9 }
-      );
-    } else {
-      drawTable(
-        [
-          { key: 'page', title: 'Page URL', width: 230 },
-          { key: 'keyword', title: 'Keyword', width: 180 },
-          { key: 'position', title: 'Google Position', width: 100, align: 'center' },
-          { key: 'found', title: 'Found', width: 70, align: 'center' },
-          { key: 'location', title: 'Location/Device', width: 120 },
-        ],
-        serpRows.slice(0, 12).map((r) => ({
-          page: displayUrl(r.pageUrl),
-          keyword: r.keyword.slice(0, 90),
-          position: r.position ?? '>100',
-          found: r.found ? 'Yes' : 'No',
-          location: `${r.location}/${r.device}`,
-        })),
-        { fontSize: 8, rowPadding: 3 }
-      );
-    }
-
-    sectionTitle('9. AI Content Improvements');
-    drawTable(
-      [
-        { key: 'page', title: 'Page', width: 210 },
-        { key: 'title', title: 'Improved Title', width: 180 },
-        { key: 'meta', title: 'Improved Meta Description', width: 180 },
-        { key: 'h1', title: 'Improved H1', width: 120 },
-        { key: 'content', title: 'Suggested Content', width: 20 + (contentWidth - 710) },
-      ],
-      pages.map((rep) => ({
-        page: displayUrl(rep.url),
-        title: (rep.improvedContent?.title || rep.suggestedTitle || 'n/a').slice(0, 90),
-        meta: (rep.improvedContent?.metaDescription || rep.suggestedMetaDescription || 'n/a').slice(0, 120),
-        h1: (rep.improvedContent?.h1 || 'n/a').slice(0, 70),
-        content: (rep.improvedContent?.bodyCopy || rep.contentImprovements?.[0] || 'n/a').slice(0, 110),
+      intelligenceReport.executionTracking.map((t) => ({
+        prId: t.prId,
+        status: t.status.toUpperCase(),
+        expected: t.expectedImpact.slice(0, 100),
+        actual: (t.actualImpact || '-').slice(0, 70),
       })),
-      { fontSize: 7, rowPadding: 2 }
+      { fontSize: 8 }
     );
 
-    sectionTitle('10. Technical SEO Recommendations');
+    sectionTitle('11. Learning & Adaptation');
     drawTable(
       [
-        { key: 'area', title: 'Area', width: 240 },
-        { key: 'rec', title: 'Recommendation', width: 460 },
+        { key: 'actionType', title: 'Action Type', width: 180 },
+        { key: 'success', title: 'Success', width: 90, align: 'center' },
+        { key: 'expected', title: 'Expected', width: 90, align: 'center' },
+        { key: 'actual', title: 'Actual', width: 90, align: 'center' },
+        { key: 'accuracy', title: 'Accuracy', width: 90, align: 'center' },
+        { key: 'note', title: 'Note', width: 180 + (contentWidth - 540) },
+      ],
+      intelligenceReport.learningInsights.map((l) => ({
+        actionType: l.actionType,
+        success: l.success ? 'YES' : 'NO',
+        expected: l.expectedImpact,
+        actual: l.actualImpact,
+        accuracy: `${l.accuracyScore}%`,
+        note: 'Latest cycle',
+      })),
+      { fontSize: 8 }
+    );
+    drawTable(
+      [
+        { key: 'actionType', title: 'Action Type', width: 180 },
+        { key: 'runs', title: 'Runs', width: 90, align: 'center' },
+        { key: 'successRate', title: 'Success Rate', width: 110, align: 'center' },
+        { key: 'avgEff', title: 'Avg Effectiveness', width: 120, align: 'center' },
+        { key: 'avgAcc', title: 'Avg Accuracy', width: 110, align: 'center' },
+        { key: 'weights', title: 'Weights', width: 110 + (contentWidth - 610), align: 'center' },
+      ],
+      intelligenceReport.historicalLearning.byActionType.map((h) => ({
+        actionType: h.actionType,
+        runs: h.totalRuns,
+        successRate: `${h.successRate}%`,
+        avgEff: h.averageEffectiveness,
+        avgAcc: `${h.averageAccuracy}%`,
+        weights: `P:${intelligenceReport.weightingAdjustments.priorityWeight} O:${intelligenceReport.weightingAdjustments.opportunityWeight}`,
+      })),
+      { fontSize: 8 }
+    );
+    const bestLearning = intelligenceReport.historicalLearning.byActionType[0]
+      ? [...intelligenceReport.historicalLearning.byActionType].sort((a, b) => b.averageEffectiveness - a.averageEffectiveness)[0]
+      : null;
+    const weakestLearning = intelligenceReport.historicalLearning.byActionType[0]
+      ? [...intelligenceReport.historicalLearning.byActionType].sort((a, b) => a.averageEffectiveness - b.averageEffectiveness)[0]
+      : null;
+    drawTable(
+      [
+        { key: 'metric', title: 'Learning Summary', width: 260 },
+        { key: 'value', title: 'Value', width: 440 },
       ],
       [
-        { area: 'Schema markup', rec: 'Add Organization/WebSite/WebPage schema with validation checks.' },
-        { area: 'Internal linking', rec: 'Add contextual links between related pages with descriptive anchor text.' },
-        { area: 'Image alt attributes', rec: 'Add descriptive ALT text to informative images and key visuals.' },
-        { area: 'Core Web Vitals', rec: 'Reduce JS execution, optimize images/fonts, and improve LCP/INP/CLS.' },
-        { area: 'Mobile UX', rec: 'Improve tap targets, responsive layout, and readability on mobile devices.' },
-      ]
+        { metric: 'Best Performing Action', value: bestLearning ? `${bestLearning.actionType} (${bestLearning.averageEffectiveness})` : '-' },
+        { metric: 'Weakest Action', value: weakestLearning ? `${weakestLearning.actionType} (${weakestLearning.averageEffectiveness})` : '-' },
+        {
+          metric: 'System Adjustment Note',
+          value: `Priority weight ${intelligenceReport.weightingAdjustments.priorityWeight}, Opportunity weight ${intelligenceReport.weightingAdjustments.opportunityWeight}`,
+        },
+      ],
+      { fontSize: 9 }
     );
 
-    sectionTitle('11. Priority Action Plan');
+    sectionTitle('12. Score Simulation');
+    const totalBreakdownScore =
+      intelligenceReport.summary.breakdown.technicalScore +
+      intelligenceReport.summary.breakdown.contentScore +
+      intelligenceReport.summary.breakdown.keywordScore +
+      intelligenceReport.summary.breakdown.linkScore;
+    const modeledDelta = (score: number): number =>
+      totalBreakdownScore > 0
+        ? Math.round(((score / totalBreakdownScore) * intelligenceReport.summary.improvement) * 10) / 10
+        : 0;
     drawTable(
       [
-        { key: 'priority', title: 'Priority', width: 120, align: 'center' },
-        { key: 'action', title: 'Action', width: 580 },
+        { key: 'metric', title: 'Metric', width: 260 },
+        { key: 'value', title: 'Value', width: 440 },
       ],
       [
-        { priority: 1, action: 'Fix missing H1 tags' },
-        { priority: 2, action: 'Fix duplicate/missing titles with unique page-specific titles' },
-        { priority: 3, action: 'Increase content depth and topical relevance by page intent' },
-        { priority: 4, action: 'Improve internal linking map between related pages' },
-        { priority: 5, action: 'Add and validate schema markup' },
-      ]
+        { metric: 'Before', value: intelligenceReport.scoreSimulation.before },
+        { metric: 'After', value: intelligenceReport.scoreSimulation.after },
+        { metric: 'Why This Matters', value: intelligenceReport.explanation.whyThisMatters },
+        { metric: 'Expected Outcome', value: intelligenceReport.explanation.expectedOutcome },
+        { metric: 'Pages analyzed', value: intelligenceReport.dataQualityCheck.pagesAnalyzed },
+        { metric: 'Unique keywords', value: intelligenceReport.dataQualityCheck.uniqueKeywords },
+        { metric: 'Duplicate keywords removed', value: intelligenceReport.dataQualityCheck.duplicateKeywordsRemoved },
+        { metric: 'Invalid keywords filtered', value: intelligenceReport.dataQualityCheck.invalidKeywordsFiltered },
+      ],
+      { fontSize: 9 }
+    );
+    drawTable(
+      [
+        { key: 'category', title: 'Category', width: 260 },
+        { key: 'delta', title: 'Score Delta', width: 440 },
+      ],
+      [
+        { category: 'Technical', delta: `+${modeledDelta(intelligenceReport.summary.breakdown.technicalScore)}` },
+        { category: 'Content', delta: `+${modeledDelta(intelligenceReport.summary.breakdown.contentScore)}` },
+        { category: 'Keyword', delta: `+${modeledDelta(intelligenceReport.summary.breakdown.keywordScore)}` },
+        { category: 'Link', delta: `+${modeledDelta(intelligenceReport.summary.breakdown.linkScore)}` },
+      ],
+      { fontSize: 9 }
     );
 
-    sectionTitle('12. Overall SEO Opportunity Summary');
-    const currentContent = pages.length ? Math.round(pages.reduce((s, p) => s + (p.scoreBreakdown?.content ?? 50), 0) / pages.length) : 0;
-    const currentTechnical = pages.length ? Math.round(pages.reduce((s, p) => s + (p.scoreBreakdown?.technical ?? 50), 0) / pages.length) : 0;
-    const currentRanking = pages.length ? Math.round(pages.reduce((s, p) => s + (p.keywordInsights?.rankingProbability ?? 35), 0) / pages.length) : 0;
-    drawTable(
-      [
-        { key: 'metric', title: 'Metric', width: 220 },
-        { key: 'current', title: 'Current', width: 220, align: 'center' },
-        { key: 'after', title: 'After Fix', width: 260, align: 'center' },
-      ],
-      [
-        { metric: 'SEO Score', current: roundedAvg, after: estimatedSiteScore },
-        { metric: 'Content Quality', current: `${currentContent}/100`, after: `${Math.min(100, currentContent + 20)}/100` },
-        { metric: 'Ranking Potential', current: `${currentRanking}%`, after: `${Math.min(95, currentRanking + 22)}%` },
-        { metric: 'Technical SEO', current: `${currentTechnical}/100`, after: `${Math.min(100, currentTechnical + 18)}/100` },
-      ]
+    sectionTitle('13. Next steps, definitions, and automation');
+    doc.fontSize(9).fillColor('#334155').text('What runs automatically vs what you do manually', leftX, doc.y, {
+      width: contentWidth,
+      underline: true,
+    });
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'This PDF is generated by the SEO agent after a crawl and model pass. It does not edit your site by itself. Engineers may use GitHub or a CMS to apply rows from section 10; content owners should rewrite any draft that does not match brand voice or the true page topic. Integrations (e.g. GitHub issues or PR bots) only run when you enable them in your deployment.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
     );
+    doc.moveDown(0.45);
+    doc.fontSize(9).fillColor('#334155').text('Suggested next steps', leftX, doc.y, {
+      width: contentWidth,
+      underline: true,
+    });
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        '1) Share sections 3–6 with the page owner for fact-checking. 2) Fix broken links and factual errors before SEO experiments. 3) For each URL in section 10 with a low "Topic fit" score, either change the primary keyword in your strategy or discard auto snippets. 4) Publish only after SME review of title, meta, H1, and intro. 5) Re-run a scan after changes to refresh scores.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.45);
+    doc.fontSize(9).fillColor('#334155').text('Definitions (plain language)', leftX, doc.y, {
+      width: contentWidth,
+      underline: true,
+    });
+    doc.moveDown(0.35);
+    doc.fontSize(8).fillColor('#64748b').text(
+      softWrapForPdf(
+        'Score simulation: illustrative math from your scan averages—not a promise from Google. Topic fit: share of primary-keyword words found in the live URL slug, browser title, and H1. Confidence: how strong the crawl + keyword signals were for that bundle of edits. PR / pull request: a reviewable package of file changes—common in software teams.'
+      ),
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.5);
+    doc.fontSize(8).fillColor('#94a3b8').text(
+      'Report layout is data-first for speed; richer charts and branding can be added in the web dashboard.',
+      leftX,
+      doc.y,
+      { width: contentWidth, align: 'left' }
+    );
+    doc.moveDown(0.6);
 
     doc.fontSize(8).fillColor('#94a3b8').text(`Generated ${new Date().toISOString()} — AI SEO Agent`, {
       align: 'center',
@@ -642,10 +1102,7 @@ export function buildScanReportPdf(meta: ScanPdfMeta, issues: ScanPdfIssueRow[])
 
     const contentWidth = doc.page.width - 96;
 
-    doc.fontSize(20).fillColor('#0f172a').text('SEO scan report', { align: 'center' });
-    doc.moveDown(0.5);
-    doc.fontSize(11).fillColor('#334155').text(`Domain: ${meta.domain}`, { align: 'center' });
-    doc.moveDown(1.2);
+    drawBrandedPdfHeader(doc, 'SEO scan report', `Domain: ${meta.domain}`);
 
     doc.fontSize(12).fillColor('#0f172a').text('Summary', { underline: true });
     doc.moveDown(0.4);
@@ -678,7 +1135,7 @@ export function buildScanReportPdf(meta: ScanPdfMeta, issues: ScanPdfIssueRow[])
       issues.forEach((row, idx) => {
         const solution =
           row.ai_suggestion?.trim() ||
-          'No AI recommendation stored. Re-run scan with OPENAI_API_KEY.';
+          'No AI recommendation stored. Set OpenAI:ApiKey in appsettings.json and re-run scan.';
 
         if (doc.y > doc.page.height - 180) doc.addPage();
 

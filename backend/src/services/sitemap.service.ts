@@ -1,10 +1,35 @@
 import { logger } from '../utils/logger';
 
+async function sitemapUrlsFromRobots(origin: string): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    const res = await fetch(`${origin}/robots.txt`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SEOAgentBot/1.0)' },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) return out;
+    const text = await res.text();
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^\s*Sitemap:\s*(\S+)/i);
+      if (m?.[1]) out.push(m[1].trim());
+    }
+  } catch (e) {
+    logger.debug('robots.txt sitemap discovery failed', { origin, error: String(e) });
+  }
+  return out;
+}
+
 /** Fetch same-origin page URLs from sitemap.xml / nested sitemap indexes (best-effort). */
 export async function fetchSitemapUrls(baseOrigin: string): Promise<string[]> {
   const origin = new URL(baseOrigin).origin;
   const pageUrls = new Set<string>();
-  const queue: string[] = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`, `${origin}/wp-sitemap.xml`];
+  const robotsSitemaps = await sitemapUrlsFromRobots(origin);
+  const queue: string[] = [
+    ...robotsSitemaps,
+    `${origin}/sitemap.xml`,
+    `${origin}/sitemap_index.xml`,
+    `${origin}/wp-sitemap.xml`,
+  ];
   const fetchedXml = new Set<string>();
   const maxXmlFetches = 25;
 

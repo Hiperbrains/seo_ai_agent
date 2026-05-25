@@ -1,0 +1,101 @@
+<div class="auth-page">
+  <app-auth-hero />
+
+  <section class="auth-panel">
+    <div class="auth-panel__inner">
+      <h1 class="auth-panel__title">Create new account</h1>
+      <p class="auth-panel__switch">
+        Already have an account?
+        <a routerLink="/login">Login</a>
+      </p>
+
+      @if (error) {
+        <div class="banner error">{{ error }}</div>
+      }
+
+      <form class="auth-form" (ngSubmit)="submit()">
+        <div class="auth-grid">
+          <div class="auth-field">
+            <label for="name">Name<span class="req">*</span></label>
+            <input id="name" type="text" name="name" [(ngModel)]="name" placeholder="Enter your name" required />
+          </div>
+          <div class="auth-field">
+            <label for="companyName">Company<span class="req">*</span></label>
+            <input
+              id="companyName"
+              type="text"
+              name="companyName"
+              [(ngModel)]="companyName"
+              placeholder="Enter company name"
+              required
+            />
+          </div>
+          <div class="auth-field">
+            <label for="email">Email<span class="req">*</span></label>
+            <input
+              id="email"
+              type="email"
+              name="email"
+              [(ngModel)]="email"
+              placeholder="Enter email id"
+              required
+              autocomplete="email"
+            />
+          </div>
+          <div class="auth-field auth-field--select">
+            <label for="country">Country<span class="req">*</span></label>
+            <select id="country" name="country" [(ngModel)]="country" required>
+              <option value="" disabled>Choose country</option>
+              <option value="US">United States</option>
+              <option value="GB">United Kingdom</option>
+              <option value="IN">India</option>
+              <option value="CA">Canada</option>
+              <option value="AU">Australia</option>
+              <option value="DE">Germany</option>
+              <option value="FR">France</option>
+              <option value="OTHER">Other</option>
+            </select>
+            <img class="auth-chevron" src="/auth/chevron-down.svg" alt="" aria-hidden="true" />
+          </div>
+          <div class="auth-field">
+            <label for="password">Password<span class="req">*</span></label>
+            <input
+              id="password"
+              [type]="showPassword ? 'text' : 'password'"
+              name="password"
+              [(ngModel)]="password"
+              placeholder="Enter password"
+              required
+              minlength="8"
+              autocomplete="new-password"
+            />
+          </div>
+          <div class="auth-field">
+            <label for="confirmPassword">Confirm Password<span class="req">*</span></label>
+            <input
+              id="confirmPassword"
+              [type]="showConfirm ? 'text' : 'password'"
+              name="confirmPassword"
+              [(ngModel)]="confirmPassword"
+              placeholder="Confirm password"
+              required
+              autocomplete="new-password"
+            />
+          </div>
+        </div>
+
+        <label class="auth-terms">
+          <input type="checkbox" name="terms" [(ngModel)]="agreedToTerms" required />
+          <span>
+            Please confirm that you agree to our
+            <a href="#" (click)="$event.preventDefault()">Terms and Conditions.</a>
+          </span>
+        </label>
+
+        <button class="btn-auth-primary" type="submit" [disabled]="busy || !agreedToTerms">
+          {{ busy ? 'Creating account…' : 'Get started' }}
+        </button>
+      </form>
+    </div>
+  </section>
+</div>

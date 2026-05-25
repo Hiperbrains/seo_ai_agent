@@ -1,7 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import { config } from '../config/config';
-import type { CrawlPageResult, SeoPageReport } from '../models/scan.model';
+import type {
+  CompetitorGapItem,
+  CrawlPageResult,
+  KeywordClusterItem,
+  SeoActionPlanItem,
+  SeoPageReport,
+  TrendKeywordInsight,
+} from '../models/scan.model';
 
 function reportsDir(): string {
   return path.join(path.dirname(config.dbPath), 'reports');
@@ -12,6 +19,13 @@ export interface StoredScanReport {
   domain: string;
   generatedAt: string;
   pageReports: Record<string, SeoPageReport>;
+  trendKeywords?: TrendKeywordInsight[] | null;
+  actionPlan?: string[];
+  actionPlanItems?: SeoActionPlanItem[];
+  competitorKeywordGaps?: CompetitorGapItem[];
+  keywordClusters?: KeywordClusterItem[];
+  quickWins?: TrendKeywordInsight[];
+  topOpportunities?: TrendKeywordInsight[];
   pages?: CrawlPageResult[];
 }
 
@@ -19,6 +33,13 @@ export function saveScanReportFile(
   scanId: number,
   domain: string,
   pageReports: Record<string, SeoPageReport>,
+  trendKeywords?: TrendKeywordInsight[] | null,
+  actionPlan?: string[],
+  actionPlanItems?: SeoActionPlanItem[],
+  competitorKeywordGaps?: CompetitorGapItem[],
+  keywordClusters?: KeywordClusterItem[],
+  quickWins?: TrendKeywordInsight[],
+  topOpportunities?: TrendKeywordInsight[],
   pages?: CrawlPageResult[]
 ): void {
   const dir = reportsDir();
@@ -28,6 +49,13 @@ export function saveScanReportFile(
     domain,
     generatedAt: new Date().toISOString(),
     pageReports,
+    trendKeywords,
+    actionPlan,
+    actionPlanItems,
+    competitorKeywordGaps,
+    keywordClusters,
+    quickWins,
+    topOpportunities,
     pages,
   };
   fs.writeFileSync(path.join(dir, `${scanId}.json`), JSON.stringify(payload, null, 2), 'utf8');
@@ -40,5 +68,16 @@ export function loadScanReportFile(scanId: number): StoredScanReport | null {
     return JSON.parse(fs.readFileSync(p, 'utf8')) as StoredScanReport;
   } catch {
     return null;
+  }
+}
+
+export function deleteScanReportFile(scanId: number): boolean {
+  const p = path.join(reportsDir(), `${scanId}.json`);
+  if (!fs.existsSync(p)) return false;
+  try {
+    fs.unlinkSync(p);
+    return true;
+  } catch {
+    return false;
   }
 }

@@ -93,8 +93,15 @@ export class ApiService {
     domain: string;
     emailTo?: string;
     createGithubIssues?: boolean;
-  }): Observable<{ scanId: number; domain: string; status: string; message: string }> {
-    return this.http.post<{ scanId: number; domain: string; status: string; message: string }>(`${this.base}/scan`, body);
+  }): Observable<{ scanId: number; domain: string; status: string; message: string; alreadyRunning?: boolean }> {
+    return this.http.post<{ scanId: number; domain: string; status: string; message: string; alreadyRunning?: boolean }>(
+      `${this.base}/scan`,
+      body
+    );
+  }
+
+  deleteScan(scanId: number): Observable<{ ok: boolean; message: string }> {
+    return this.http.delete<{ ok: boolean; message: string }>(`${this.base}/scans/${scanId}`);
   }
 
   stopScan(scanId: number): Observable<{ ok: boolean; scanId: number; status: string; message: string }> {
@@ -125,6 +132,11 @@ export class ApiService {
       scanId,
       emailTo,
     });
+  }
+
+  /** Authenticated PDF download (Bearer token via auth interceptor). */
+  downloadReportPdf(scanId: number): Observable<Blob> {
+    return this.http.get(`${this.base}/reports/${scanId}/pdf`, { responseType: 'blob' });
   }
 
   getSettings(): Observable<Record<string, string>> {

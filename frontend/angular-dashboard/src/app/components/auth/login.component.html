@@ -1,0 +1,59 @@
+<div class="auth-page">
+  <app-auth-hero />
+
+  <section class="auth-panel">
+    <div class="auth-panel__inner">
+      <h1 class="auth-panel__title">Welcome Back</h1>
+      <p class="auth-panel__hint">Login to your account in just few simple steps.</p>
+      <p class="auth-panel__switch">
+        Do not have an account yet?
+        <a routerLink="/signup">Signup</a>
+      </p>
+
+      @if (error) {
+        <div class="banner error">{{ error }}</div>
+      }
+
+      <form class="auth-form" (ngSubmit)="submit()">
+        <div class="auth-stack">
+          <div class="auth-field">
+            <label for="email">Email<span class="req">*</span></label>
+            <input
+              id="email"
+              type="email"
+              name="email"
+              [(ngModel)]="email"
+              placeholder="Enter email id"
+              required
+              autocomplete="email"
+            />
+          </div>
+          <div class="auth-field">
+            <label for="password">Password<span class="req">*</span></label>
+            <input
+              id="password"
+              [type]="showPassword ? 'text' : 'password'"
+              name="password"
+              [(ngModel)]="password"
+              placeholder="Enter password"
+              required
+              autocomplete="current-password"
+            />
+          </div>
+        </div>
+
+        <label class="auth-terms">
+          <input type="checkbox" name="terms" [(ngModel)]="agreedToTerms" required />
+          <span>
+            Please confirm that you agree to our
+            <a href="#" (click)="$event.preventDefault()">Terms and Conditions.</a>
+          </span>
+        </label>
+
+        <button class="btn-auth-primary" type="submit" [disabled]="busy || !agreedToTerms">
+          {{ busy ? 'Signing in…' : 'Get started' }}
+        </button>
+      </form>
+    </div>
+  </section>
+</div>

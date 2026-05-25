@@ -13,8 +13,15 @@
 
   <section class="panel">
     <h2>Add domain</h2>
-    <div class="row">
-      <input type="text" [(ngModel)]="newDomain" placeholder="example.com" />
+    <div class="row row--add">
+      <input
+        class="dm-field"
+        type="text"
+        [(ngModel)]="newDomain"
+        placeholder="example.com"
+        autocomplete="off"
+        spellcheck="false"
+      />
       <button type="button" (click)="add()" [disabled]="!newDomain.trim()">Add</button>
     </div>
   </section>
@@ -22,19 +29,40 @@
   <section class="panel">
     <h2>Scan domain</h2>
     <p class="muted small">POST /api/scan — optional email report and GitHub issue creation.</p>
-    <div class="stack">
-      <label>Domain</label>
-      <input type="text" [(ngModel)]="scanDomain" placeholder="example.com" />
-      <label>Email report to (optional)</label>
-      <input type="email" [(ngModel)]="emailTo" placeholder="you@company.com" />
-      <label class="check">
-        <input type="checkbox" [(ngModel)]="createGithub" />
-        Create GitHub issues for each detected issue
-      </label>
-      <button type="button" (click)="scan()" [disabled]="launching || !scanDomain.trim()">
-        {{ launching ? 'Starting…' : 'Scan domain' }}
-      </button>
+    <div class="scan-row">
+      <div class="scan-row__group">
+        <label for="dm-scan-domain" class="scan-row__lbl">Domain</label>
+        <input
+          id="dm-scan-domain"
+          class="dm-field"
+          type="text"
+          [(ngModel)]="scanDomain"
+          placeholder="example.com"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+      <div class="scan-row__group">
+        <label for="dm-scan-email" class="scan-row__lbl">Email report to (optional)</label>
+        <input
+          id="dm-scan-email"
+          class="dm-field"
+          type="email"
+          [(ngModel)]="emailTo"
+          placeholder="you@company.com"
+          autocomplete="email"
+        />
+      </div>
+      <div class="scan-row__btnwrap">
+        <button type="button" class="scan-row__btn" (click)="scan()" [disabled]="launching || !scanDomain.trim()">
+          {{ launching ? 'Starting…' : 'Scan domain' }}
+        </button>
+      </div>
     </div>
+    <label class="check scan-row__check">
+      <input type="checkbox" [(ngModel)]="createGithub" />
+      Create GitHub issues for each detected issue
+    </label>
   </section>
 
   <section class="panel">
