@@ -135,11 +135,11 @@ jobs:
           docker volume create "hiperbrains-${ENV}-data" || true
 
           echo "Creating .env file..."
-          cat > .env <<'EOF'
-NODE_ENV=production
-PORT=8080
-DB_PATH=/app/data/app.db
-EOF
+          printf '%s\n' \
+            'NODE_ENV=production' \
+            'PORT=8080' \
+            'DB_PATH=/app/data/app.db' \
+            > .env
 
           node scripts/merge-appsettings-into-env.js appsettings.json .env
 
