@@ -190,6 +190,44 @@ jobs:
           echo "Health check passed"
           docker rm -f "$NEXT_NAME" 2>/dev/null || true
 
+          PREVIOUS_IMAGE=""
+          if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            PREVIOUS_IMAGE=$(docker inspect "$CONTAINER_NAME" --format '{{.Config.Image}}' 2>/dev/null || true)
+          fi
+          if [ -z "$PREVIOUS_IMAGE" ]; then
+            PREVIOUS_IMAGE=$(docker images --format '{{.Repository}}:{{.Tag}}' \
+              | grep -E "^${IMAGE_NAME}:${ENV}-" \
+              | grep -v "$IMAGE_TAG" \
+              | head -n 1 || true)
+          fi
+          echo "Previous image (rollback): ${PREVIOUS_IMAGE:-none}"
+
+          rollback_previous() {
+            if [ -z "$PREVIOUS_IMAGE" ]; then
+              echo "WARN: No previous image to roll back"
+              return 1
+            fi
+            echo "Rolling back to $PREVIOUS_IMAGE on port ${PORT}..."
+            docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              -p "0.0.0.0:${PORT}:8080" \
+              --env-file .env \
+              -e ConfigUrl="$CONFIG_URL" \
+              -v "hiperbrains-${ENV}-data:/app/data" \
+              --restart unless-stopped \
+              --log-driver=json-file \
+              "$PREVIOUS_IMAGE"
+            sleep 3
+            if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+              echo "Rollback healthy — site restored on previous image"
+              return 0
+            fi
+            echo "ERROR: Rollback container also failed health check"
+            docker logs "$CONTAINER_NAME" --tail 80 || true
+            return 1
+          }
+
           echo "Stopping old containers..."
           docker stop "$CONTAINER_NAME" 2>/dev/null || true
           docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -207,10 +245,18 @@ jobs:
             --log-driver=json-file \
             "$IMAGE_TAG"
 
-          sleep 3
-          if ! curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+          prod_healthy=0
+          for i in $(seq 1 20); do
+            if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+              prod_healthy=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$prod_healthy" -ne 1 ]; then
             echo "ERROR: Production container not healthy on port ${PORT}"
             docker logs "$CONTAINER_NAME" --tail 80 || true
+            rollback_previous || true
             exit 1
           fi
 

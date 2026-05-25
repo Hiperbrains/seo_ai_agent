@@ -60,20 +60,27 @@ async function shutdown(signal: string): Promise<void> {
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-void initDb().then(async () => {
-  await recoverOrphanedRunningScans();
-  httpServer = app.listen(config.port, () => {
-    logger.info(`SEO Agent API listening on port ${config.port}`);
-    startDataRetentionScheduler();
-    startScheduler();
+void initDb()
+  .then(async () => {
+    await recoverOrphanedRunningScans();
+    httpServer = app.listen(config.port, () => {
+      logger.info(`SEO Agent API listening on port ${config.port}`);
+      startDataRetentionScheduler();
+      startScheduler();
+    });
+    httpServer.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        logger.error(
+          `Port ${config.port} is already in use. Stop other Node processes (Task Manager / netstat) and run a single backend instance.`
+        );
+        process.exit(1);
+      }
+      throw err;
+    });
+  })
+  .catch((err) => {
+    logger.error('Database init failed — check HIPERBRAINS_DATABASE / DATABASE_URL', {
+      error: String(err instanceof Error ? err.message : err),
+    });
+    process.exit(1);
   });
-  httpServer.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE') {
-      logger.error(
-        `Port ${config.port} is already in use. Stop other Node processes (Task Manager / netstat) and run a single backend instance.`
-      );
-      process.exit(1);
-    }
-    throw err;
-  });
-});

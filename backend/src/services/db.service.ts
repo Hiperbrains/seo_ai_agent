@@ -31,7 +31,11 @@ export async function initDb(): Promise<void> {
   initPromise = (async () => {
     if (config.databaseUrl) {
       driver = 'postgres';
-      pgPool = new Pool({ connectionString: config.databaseUrl });
+      pgPool = new Pool({
+        connectionString: config.databaseUrl,
+        connectionTimeoutMillis: 15_000,
+        idleTimeoutMillis: 30_000,
+      });
       await migratePostgres();
       logger.info('Database: PostgreSQL (multi-tenant)');
     } else {
