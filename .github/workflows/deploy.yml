@@ -25,6 +25,7 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.ACCESSKEYID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SECRETKEY }}
       AWS_DEFAULT_REGION: us-east-2
+      APPSETTINGS_JSON: ${{ secrets.APPSETTINGS_JSON }}
 
     runs-on:
       - self-hosted
@@ -101,6 +102,16 @@ jobs:
           echo "Port      : $PORT"
           echo "Env       : $ENV"
           echo "====================================="
+
+          if [ ! -f appsettings.json ]; then
+            if [ -n "$APPSETTINGS_JSON" ]; then
+              printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
+              echo "Wrote appsettings.json from APPSETTINGS_JSON secret"
+            else
+              echo "ERROR: appsettings.json missing. Copy it to the runner repo root or set APPSETTINGS_JSON secret."
+              exit 1
+            fi
+          fi
 
           echo "Building image..."
           docker build --no-cache -t "$IMAGE_TAG" .
