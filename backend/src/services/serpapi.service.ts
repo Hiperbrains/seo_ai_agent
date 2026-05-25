@@ -1,4 +1,4 @@
-import { getSetting } from './db.service';
+import { getActiveSetting } from './companyConfig.service';
 
 export interface SerpLiveRankResult {
   keyword: string;
@@ -15,7 +15,7 @@ type SerpResultItem = { position: number; title: string; link: string; snippet: 
 export type ExternalTrendSignal = { keyword: string; source: 'serpapi_related'; confidence: number };
 
 function getSerpApiKey(): string {
-  return getSetting('SERPAPI_KEY') || process.env.SERPAPI_KEY || '';
+  return getActiveSetting('SERPAPI_KEY') || process.env.SERPAPI_KEY || '';
 }
 
 function normDomain(input: string): string {

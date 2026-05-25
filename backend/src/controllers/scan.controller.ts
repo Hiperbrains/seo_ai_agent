@@ -1,6 +1,27 @@
-import { Request, Response } from 'express';
-import { getDb, getSetting, logActivity, setSetting } from '../services/db.service';
+import { Response } from 'express';
+import type { AuthRequest } from '../context/company.context';
+import { getRequestCompanyId, runWithCompanyContextAsync } from '../context/company.context';
+import {
+  dbAll,
+  dbExecute,
+  dbGet,
+  deleteScanById,
+  getDriver,
+  isMultiTenantEnabled,
+  logActivityAsync,
+  recoverStaleRunningScans,
+} from '../services/db.service';
+import {
+  getAppSettingsForApi,
+  getCompanyConfig,
+  getCompanySettingsForApi,
+  mergeCompanySettings,
+  SETTINGS_KEYS,
+} from '../services/companyConfig.service';
+import { getActiveSetting } from '../services/companyConfig.service';
 import { createScanRecord, runScanPipeline } from '../services/scanPipeline.service';
+import { deleteScanReportFile } from '../services/reportFile.service';
+import { sqlNow } from '../helpers/companyScope';
 import { createGithubIssue, formatIssueBody } from '../services/github.service';
 import {
   buildCompositeSeoSnippet,
@@ -20,11 +41,43 @@ import {
 } from '../services/pdfReport.service';
 import { loadScanReportFile } from '../services/reportFile.service';
 import { buildIntelligenceReport } from '../services/intelligenceReport.service';
-import { registerActiveScan, stopActiveScan, unregisterActiveScan } from '../services/scanTaskRegistry.service';
+import { config } from '../config/config';
+import {
+  findActiveScanIdForDomain,
+  listActiveScanIds,
+  registerActiveScan,
+  stopActiveScan,
+  unregisterActiveScan,
+  withDomainScanStartLock,
+} from '../services/scanTaskRegistry.service';
 import { fetchPageSpeedMetrics } from '../services/pagespeed.service';
 import { fetchSerpLiveRank, testSerpApiConnection } from '../services/serpapi.service';
 
-export async function postScan(req: Request, res: Response): Promise<void> {
+function companyIdFrom(req: AuthRequest): number | undefined {
+  return getRequestCompanyId(req);
+}
+
+function normalizeScanDomain(domain: string): string {
+  return domain.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+}
+
+async function findRunningScanIdInDb(domain: string, companyId: number | undefined): Promise<number | null> {
+  const dc = domainCompanyFilter(companyId);
+  const row = await dbGet<{ id: number }>(
+    `SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id
+     WHERE s.status = 'running' AND d.domain = ? AND ${dc.clause}
+     ORDER BY s.id DESC LIMIT 1`,
+    [domain, ...dc.params]
+  );
+  return row?.id ?? null;
+}
+
+function domainCompanyFilter(companyId: number | undefined): { clause: string; params: unknown[] } {
+  if (companyId != null) return { clause: 'd.company_id = ?', params: [companyId] };
+  return { clause: 'd.company_id IS NULL', params: [] };
+}
+
+export async function postScan(req: AuthRequest, res: Response): Promise<void> {
   try {
     const { domain, emailTo, createGithubIssues } = req.body as {
       domain?: string;
@@ -36,20 +89,92 @@ export async function postScan(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const created = createScanRecord(domain, false);
-    const controller = registerActiveScan(created.scanId, created.domain);
+    const companyId = companyIdFrom(req);
+    const normalizedDomain = normalizeScanDomain(domain);
 
-    void runScanPipeline(
-      created.domain,
-      {
-        sendEmail: Boolean(emailTo),
-        reportEmailTo: emailTo,
-        createGithubIssues: Boolean(createGithubIssues),
-      },
-      { scanId: created.scanId, abortSignal: controller.signal }
-    )
-      .catch((e) => logger.error('background scan failed', { scanId: created.scanId, error: String(e) }))
-      .finally(() => unregisterActiveScan(created.scanId));
+    const startResult = await withDomainScanStartLock(companyId ?? null, normalizedDomain, async () => {
+      const inMemoryRunning = findActiveScanIdForDomain(companyId ?? null, normalizedDomain);
+      const dbRunning = await findRunningScanIdInDb(normalizedDomain, companyId);
+      const existingScanId = inMemoryRunning ?? dbRunning;
+      if (existingScanId != null) {
+        return { kind: 'existing' as const, scanId: existingScanId };
+      }
+      const created = await createScanRecord(normalizedDomain, companyId, false);
+      const controller = registerActiveScan(created.scanId, created.domain, companyId ?? null);
+      return { kind: 'created' as const, created, controller };
+    });
+
+    if (startResult.kind === 'existing') {
+      res.status(200).json({
+        scanId: startResult.scanId,
+        domain: normalizedDomain,
+        status: 'running',
+        message: 'A scan is already running for this domain.',
+        alreadyRunning: true,
+      });
+      return;
+    }
+
+    const { created, controller } = startResult;
+
+    const authStore = req.auth
+      ? {
+          ...req.auth,
+          settings: companyId != null ? await getCompanyConfig(companyId) : req.auth.settings,
+        }
+      : undefined;
+
+    const pipelineMs = config.scanPipelineMaxMs;
+    const runJob = () => {
+      logger.info('Scan pipeline started', { scanId: created.scanId, domain: created.domain });
+      const pipeline = runScanPipeline(
+        created.domain,
+        {
+          sendEmail: Boolean(emailTo),
+          reportEmailTo: emailTo,
+          createGithubIssues: Boolean(createGithubIssues),
+        },
+        { scanId: created.scanId, abortSignal: controller.signal }
+      );
+      const timed = Promise.race([
+        pipeline,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Scan timed out after ${Math.round(pipelineMs / 60000)} minutes. Try again or reduce MAX_PAGES_PER_SCAN.`
+                )
+              ),
+            pipelineMs
+          );
+        }),
+      ]);
+      return timed
+        .then((result) => {
+          logger.info('Scan pipeline completed', {
+            scanId: created.scanId,
+            domain: created.domain,
+            pages: result.pages.length,
+          });
+          return result;
+        })
+        .catch(async (e) => {
+          logger.error('background scan failed', { scanId: created.scanId, error: String(e) });
+          const err = String(e);
+          await dbExecute(
+            `UPDATE scans SET status = 'failed', completed_at = ${sqlNow()}, email_error = ? WHERE id = ? AND status = 'running'`,
+            [err, created.scanId]
+          );
+        })
+        .finally(() => unregisterActiveScan(created.scanId));
+    };
+
+    if (authStore) {
+      void runWithCompanyContextAsync(authStore, runJob);
+    } else {
+      void runJob();
+    }
 
     res.status(202).json({
       scanId: created.scanId,
@@ -63,17 +188,59 @@ export async function postScan(req: Request, res: Response): Promise<void> {
   }
 }
 
-export function postStopScan(req: Request, res: Response): void {
+export async function deleteScan(req: AuthRequest, res: Response): Promise<void> {
   try {
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId) || scanId < 1) {
       res.status(400).json({ error: 'Invalid scan id' });
       return;
     }
-    const db = getDb();
-    const row = db
-      .prepare(`SELECT s.id, s.status, d.domain FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ?`)
-      .get(scanId) as { id: number; status: string; domain: string } | undefined;
+    const companyId = companyIdFrom(req);
+    if (isMultiTenantEnabled() && companyId == null) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    if (companyId != null) {
+      const ok = await deleteScanById(scanId, companyId);
+      if (!ok) {
+        res.status(404).json({ error: 'Scan not found' });
+        return;
+      }
+    } else {
+      const row = await dbGet<{ id: number }>(
+        `SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ? AND d.company_id IS NULL`,
+        [scanId]
+      );
+      if (!row) {
+        res.status(404).json({ error: 'Scan not found' });
+        return;
+      }
+      await dbExecute('DELETE FROM issues WHERE scan_id = ?', [scanId]);
+      await dbExecute('DELETE FROM activity_log WHERE scan_id = ?', [scanId]);
+      await dbExecute('DELETE FROM scans WHERE id = ?', [scanId]);
+    }
+    deleteScanReportFile(scanId);
+    await logActivityAsync('info', `Scan deleted: #${scanId}`, undefined, { scanId }, companyId);
+    res.json({ ok: true, message: 'Scan deleted' });
+  } catch (e) {
+    logger.error('deleteScan', { error: String(e) });
+    res.status(500).json({ error: String(e) });
+  }
+}
+
+export async function postStopScan(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const scanId = Number(req.params.scanId);
+    if (!Number.isFinite(scanId) || scanId < 1) {
+      res.status(400).json({ error: 'Invalid scan id' });
+      return;
+    }
+    const companyId = companyIdFrom(req);
+    const dc = domainCompanyFilter(companyId);
+    const row = await dbGet<{ id: number; status: string; domain: string }>(
+      `SELECT s.id, s.status, d.domain FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ? AND ${dc.clause}`,
+      [scanId, ...dc.params]
+    );
     if (!row) {
       res.status(404).json({ error: 'Scan not found' });
       return;
@@ -81,11 +248,11 @@ export function postStopScan(req: Request, res: Response): void {
 
     const wasActive = stopActiveScan(scanId);
     if (row.status === 'running') {
-      db.prepare(`UPDATE scans SET status = 'stopped', completed_at = datetime('now'), email_error = ? WHERE id = ?`).run(
+      await dbExecute(`UPDATE scans SET status = 'stopped', completed_at = ${sqlNow()}, email_error = ? WHERE id = ?`, [
         'Stopped manually by user',
-        scanId
-      );
-      logActivity('warn', `Scan stopped: ${row.domain}`, scanId, { manual: true });
+        scanId,
+      ]);
+      await logActivityAsync('warn', `Scan stopped: ${row.domain}`, scanId, { manual: true }, companyId);
     }
     if (wasActive) unregisterActiveScan(scanId);
 
@@ -108,7 +275,7 @@ async function buildSerpRankRowsForReports(
     keywordInsights?: { targetKeyword?: string; opportunityScore?: number };
   }>
 ): Promise<SerpRankRow[]> {
-  const liveEnabled = String(getSetting('ENABLE_LIVE_SERP_RANK') || process.env.ENABLE_LIVE_SERP_RANK || 'false')
+  const liveEnabled = String(getActiveSetting('ENABLE_LIVE_SERP_RANK') || process.env.ENABLE_LIVE_SERP_RANK || 'false')
     .toLowerCase()
     .trim();
   if (liveEnabled !== 'true') return [];
@@ -150,7 +317,7 @@ async function buildSerpRankRowsForReports(
 }
 
 
-export async function getPageReportsJson(req: Request, res: Response): Promise<void> {
+export async function getPageReportsJson(req: AuthRequest, res: Response): Promise<void> {
   try {
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId) || scanId < 1) {
@@ -241,7 +408,7 @@ export async function getPageReportsJson(req: Request, res: Response): Promise<v
   }
 }
 
-export function getKeywordOpportunities(req: Request, res: Response): void {
+export function getKeywordOpportunities(req: AuthRequest, res: Response): void {
   try {
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId) || scanId < 1) {
@@ -283,32 +450,32 @@ export function getKeywordOpportunities(req: Request, res: Response): void {
   }
 }
 
-export function getLatestKeywordOpportunities(req: Request, res: Response): void {
-  try {
-    const db = getDb();
-    const latest = db
-      .prepare(
-        `SELECT id
-         FROM scans
-         WHERE status = 'completed'
-         ORDER BY completed_at DESC, id DESC
-         LIMIT 1`
-      )
-      .get() as { id: number } | undefined;
+async function latestCompletedScanId(req: AuthRequest): Promise<number | undefined> {
+  const dc = domainCompanyFilter(companyIdFrom(req));
+  const latest = await dbGet<{ id: number }>(
+    `SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id
+     WHERE s.status = 'completed' AND ${dc.clause}
+     ORDER BY s.completed_at DESC, s.id DESC LIMIT 1`,
+    dc.params
+  );
+  return latest?.id;
+}
 
-    if (!latest) {
+export async function getLatestKeywordOpportunities(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const id = await latestCompletedScanId(req);
+    if (!id) {
       res.status(404).json({ error: 'No completed scans found yet.' });
       return;
     }
-
-    req.params.scanId = String(latest.id);
+    req.params.scanId = String(id);
     getKeywordOpportunities(req, res);
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 }
 
-export function getBacklinkAnalytics(req: Request, res: Response): void {
+export function getBacklinkAnalytics(req: AuthRequest, res: Response): void {
   try {
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId) || scanId < 1) {
@@ -358,32 +525,21 @@ export function getBacklinkAnalytics(req: Request, res: Response): void {
   }
 }
 
-export function getLatestBacklinkAnalytics(req: Request, res: Response): void {
+export async function getLatestBacklinkAnalytics(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const db = getDb();
-    const latest = db
-      .prepare(
-        `SELECT id
-         FROM scans
-         WHERE status = 'completed'
-         ORDER BY completed_at DESC, id DESC
-         LIMIT 1`
-      )
-      .get() as { id: number } | undefined;
-
-    if (!latest) {
+    const id = await latestCompletedScanId(req);
+    if (!id) {
       res.status(404).json({ error: 'No completed scans found yet.' });
       return;
     }
-
-    req.params.scanId = String(latest.id);
+    req.params.scanId = String(id);
     getBacklinkAnalytics(req, res);
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 }
 
-export function getImageAltRouteMap(req: Request, res: Response): void {
+export function getImageAltRouteMap(req: AuthRequest, res: Response): void {
   try {
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId) || scanId < 1) {
@@ -435,47 +591,35 @@ export function getImageAltRouteMap(req: Request, res: Response): void {
   }
 }
 
-export function getLatestImageAltRouteMap(req: Request, res: Response): void {
+export async function getLatestImageAltRouteMap(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const db = getDb();
-    const latest = db
-      .prepare(
-        `SELECT id
-         FROM scans
-         WHERE status = 'completed'
-         ORDER BY completed_at DESC, id DESC
-         LIMIT 1`
-      )
-      .get() as { id: number } | undefined;
-
-    if (!latest) {
+    const id = await latestCompletedScanId(req);
+    if (!id) {
       res.status(404).json({ error: 'No completed scans found yet.' });
       return;
     }
-
-    req.params.scanId = String(latest.id);
+    req.params.scanId = String(id);
     getImageAltRouteMap(req, res);
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 }
 
-export async function getScanReportPdf(req: Request, res: Response): Promise<void> {
+export async function getScanReportPdf(req: AuthRequest, res: Response): Promise<void> {
   try {
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId) || scanId < 1) {
       res.status(400).json({ error: 'Invalid scan id' });
       return;
     }
-    const db = getDb();
-    const row = db
-      .prepare(
-        `SELECT s.id, s.started_at, s.completed_at, s.pages_count, s.seo_score_avg, s.status, s.github_issues_created,
-                s.claude_pr_url, s.claude_pr_created_at, s.claude_pr_email_sent_at, s.claude_pr_email_error,
-                d.domain
-         FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ?`
-      )
-      .get(scanId) as
+    const dc = domainCompanyFilter(companyIdFrom(req));
+    const row = (await dbGet(
+      `SELECT s.id, s.started_at, s.completed_at, s.pages_count, s.seo_score_avg, s.status, s.github_issues_created,
+              s.claude_pr_url, s.claude_pr_created_at, s.claude_pr_email_sent_at, s.claude_pr_email_error,
+              d.domain
+       FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ? AND ${dc.clause}`,
+      [scanId, ...dc.params]
+    )) as
       | {
           id: number;
           started_at: string;
@@ -514,12 +658,11 @@ export async function getScanReportPdf(req: Request, res: Response): Promise<voi
       const report = buildIntelligenceReport(stored);
       pdf = await renderPdf(report);
     } else {
-      const issues = db
-        .prepare(
-          `SELECT page_url, issue_type, message, ai_suggestion, status, github_issue_url
-         FROM issues WHERE scan_id = ? ORDER BY page_url, id`
-        )
-        .all(scanId) as ScanPdfIssueRow[];
+      const issues = (await dbAll(
+        `SELECT page_url, issue_type, message, ai_suggestion, status, github_issue_url
+         FROM issues WHERE scan_id = ? ORDER BY page_url, id`,
+        [scanId]
+      )) as ScanPdfIssueRow[];
       pdf = await buildScanReportPdf(meta, issues);
     }
     const fname = suggestedFilename(row.domain, scanId);
@@ -535,26 +678,30 @@ export async function getScanReportPdf(req: Request, res: Response): Promise<voi
   }
 }
 
-export function getReports(_req: Request, res: Response): void {
+export async function getReports(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const db = getDb();
-    const scans = db
-      .prepare(
-        `SELECT s.id, s.domain_id, d.domain, s.started_at, s.completed_at, s.pages_count, s.seo_score_avg,
-                s.status, s.email_sent, s.email_sent_at, s.email_error, s.github_issues_created, s.scheduler_run,
-                s.claude_pr_url, s.claude_pr_created_at, s.claude_pr_email_sent_at, s.claude_pr_email_error
-         FROM scans s JOIN domains d ON d.id = s.domain_id
-         ORDER BY s.started_at DESC LIMIT 100`
-      )
-      .all();
+    await recoverStaleRunningScans(listActiveScanIds());
+    const dc = domainCompanyFilter(companyIdFrom(req));
+    const scans = await dbAll(
+      `SELECT s.id, s.domain_id, d.domain, s.started_at, s.completed_at, s.pages_count, s.seo_score_avg,
+              s.status, s.email_sent, s.email_sent_at, s.email_error, s.github_issues_created, s.scheduler_run,
+              s.claude_pr_url, s.claude_pr_created_at, s.claude_pr_email_sent_at, s.claude_pr_email_error
+       FROM scans s JOIN domains d ON d.id = s.domain_id
+       WHERE ${dc.clause}
+       ORDER BY s.started_at DESC LIMIT 100`,
+      dc.params
+    );
 
-    const issues = db
-      .prepare(
-        `SELECT i.id, i.scan_id, i.page_url, i.issue_type, i.message, i.ai_suggestion, i.status, i.github_issue_url,
-                i.seo_score, i.code_snippet, i.code_diff, i.github_pr_url, i.github_pr_branch
-         FROM issues i ORDER BY i.id DESC LIMIT 500`
-      )
-      .all();
+    const issues = await dbAll(
+      `SELECT i.id, i.scan_id, i.page_url, i.issue_type, i.message, i.ai_suggestion, i.status, i.github_issue_url,
+              i.seo_score, i.code_snippet, i.code_diff, i.github_pr_url, i.github_pr_branch
+       FROM issues i
+       JOIN scans s ON s.id = i.scan_id
+       JOIN domains d ON d.id = s.domain_id
+       WHERE ${dc.clause}
+       ORDER BY i.id DESC LIMIT 500`,
+      dc.params
+    );
 
     res.json({ scans, issues });
   } catch (e) {
@@ -562,7 +709,7 @@ export function getReports(_req: Request, res: Response): void {
   }
 }
 
-export async function postSendReport(req: Request, res: Response): Promise<void> {
+export async function postSendReport(req: AuthRequest, res: Response): Promise<void> {
   try {
     const { scanId, emailTo } = req.body as { scanId?: number; emailTo?: string };
     if (!scanId || !emailTo) {
@@ -570,12 +717,12 @@ export async function postSendReport(req: Request, res: Response): Promise<void>
       return;
     }
 
-    const db = getDb();
-    const scan = db
-      .prepare(
-        `SELECT s.id, s.pages_count, d.domain FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ?`
-      )
-      .get(scanId) as { id: number; pages_count: number; domain: string } | undefined;
+    const companyId = companyIdFrom(req);
+    const dc = domainCompanyFilter(companyId);
+    const scan = await dbGet<{ id: number; pages_count: number; domain: string }>(
+      `SELECT s.id, s.pages_count, d.domain FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.id = ? AND ${dc.clause}`,
+      [scanId, ...dc.params]
+    );
 
     if (!scan) {
       res.status(404).json({ error: 'Scan not found' });
@@ -595,9 +742,10 @@ export async function postSendReport(req: Request, res: Response): Promise<void>
           : `${r.url} — ${(r.suggestedMetaDescription || r.suggestedTitle || 'audit').slice(0, 100)}`;
       });
     } else {
-      const issueRows = db
-        .prepare(`SELECT message, ai_suggestion FROM issues WHERE scan_id = ? LIMIT 20`)
-        .all(scanId) as { message: string; ai_suggestion: string | null }[];
+      const issueRows = await dbAll<{ message: string; ai_suggestion: string | null }>(
+        `SELECT message, ai_suggestion FROM issues WHERE scan_id = ? LIMIT 20`,
+        [scanId]
+      );
       issuesCount = issueRows.length;
       aiSummaryLines = issueRows.map((i) => i.ai_suggestion || i.message);
     }
@@ -611,15 +759,17 @@ export async function postSendReport(req: Request, res: Response): Promise<void>
       to: emailTo,
     });
 
+    const emailSentSql = getDriver() === 'postgres' ? 'TRUE' : '1';
     if (r.ok) {
-      db.prepare(
-        `UPDATE scans SET email_sent = 1, email_sent_at = datetime('now'), email_error = NULL WHERE id = ?`
-      ).run(scanId);
-      logActivity('info', 'Manual email report sent', scanId, { to: emailTo });
+      await dbExecute(
+        `UPDATE scans SET email_sent = ${emailSentSql}, email_sent_at = ${sqlNow()}, email_error = NULL WHERE id = ?`,
+        [scanId]
+      );
+      await logActivityAsync('info', 'Manual email report sent', scanId, { to: emailTo }, companyId);
       res.json({ ok: true, message: 'Email sent successfully' });
     } else {
-      db.prepare(`UPDATE scans SET email_error = ? WHERE id = ?`).run(r.error, scanId);
-      logActivity('warn', 'Manual email report failed', scanId, { error: r.error });
+      await dbExecute(`UPDATE scans SET email_error = ? WHERE id = ?`, [r.error, scanId]);
+      await logActivityAsync('warn', 'Manual email report failed', scanId, { error: r.error }, companyId);
       res.status(502).json({ ok: false, error: r.error });
     }
   } catch (e) {
@@ -627,12 +777,17 @@ export async function postSendReport(req: Request, res: Response): Promise<void>
   }
 }
 
-export function getDomains(_req: Request, res: Response): void {
-  const rows = getDb().prepare('SELECT id, domain, created_at FROM domains ORDER BY id DESC').all();
+export async function getDomains(req: AuthRequest, res: Response): Promise<void> {
+  const companyId = companyIdFrom(req);
+  const dc = domainCompanyFilter(companyId);
+  const rows = await dbAll(
+    `SELECT id, domain, created_at FROM domains d WHERE ${dc.clause} ORDER BY id DESC`,
+    dc.params
+  );
   res.json(rows);
 }
 
-export function postDomain(req: Request, res: Response): void {
+export async function postDomain(req: AuthRequest, res: Response): Promise<void> {
   const { domain } = req.body as { domain?: string };
   if (!domain) {
     res.status(400).json({ error: 'domain required' });
@@ -640,121 +795,121 @@ export function postDomain(req: Request, res: Response): void {
   }
   const d = domain.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
   try {
-    getDb().prepare('INSERT OR IGNORE INTO domains (domain) VALUES (?)').run(d);
-    const row = getDb().prepare('SELECT id, domain, created_at FROM domains WHERE domain = ?').get(d);
+    const companyId = companyIdFrom(req);
+    if (companyId != null) {
+      let row = await dbGet<{ id: number; domain: string; created_at: string }>(
+        'SELECT id, domain, created_at FROM domains WHERE company_id = ? AND domain = ?',
+        [companyId, d]
+      );
+      if (!row) {
+        await dbExecute('INSERT INTO domains (company_id, domain) VALUES (?, ?)', [companyId, d]);
+        row = await dbGet('SELECT id, domain, created_at FROM domains WHERE company_id = ? AND domain = ?', [
+          companyId,
+          d,
+        ]);
+      }
+      res.json(row);
+      return;
+    }
+    const exists = await dbGet('SELECT id FROM domains WHERE domain = ? AND company_id IS NULL', [d]);
+    if (!exists) await dbExecute('INSERT INTO domains (domain) VALUES (?)', [d]);
+    const row = await dbGet('SELECT id, domain, created_at FROM domains WHERE domain = ? AND company_id IS NULL', [d]);
     res.json(row);
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 }
 
-export function getDashboardStats(_req: Request, res: Response): void {
-  const db = getDb();
-  const domains = (db.prepare('SELECT COUNT(*) as c FROM domains').get() as { c: number }).c;
-  const pages = (db.prepare('SELECT COALESCE(SUM(pages_count),0) as c FROM scans WHERE status = ?').get('completed') as {
-    c: number;
-  }).c;
-  const issues = (db.prepare('SELECT COUNT(*) as c FROM issues').get() as { c: number }).c;
-  const avg = db.prepare('SELECT AVG(seo_score_avg) as a FROM scans WHERE seo_score_avg IS NOT NULL').get() as {
-    a: number | null;
-  };
+export async function getDashboardStats(req: AuthRequest, res: Response): Promise<void> {
+  const companyId = companyIdFrom(req);
+  const dc = domainCompanyFilter(companyId);
+  const domainCount = (await dbGet<{ c: number }>(`SELECT COUNT(*) as c FROM domains d WHERE ${dc.clause}`, dc.params))?.c ?? 0;
+  const pagesRow = await dbGet<{ c: number }>(
+    `SELECT COALESCE(SUM(s.pages_count),0) as c FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.status = 'completed' AND ${dc.clause}`,
+    dc.params
+  );
+  const issuesRow = await dbGet<{ c: number }>(
+    `SELECT COUNT(*) as c FROM issues i JOIN scans s ON s.id = i.scan_id JOIN domains d ON d.id = s.domain_id WHERE ${dc.clause}`,
+    dc.params
+  );
+  const avg = await dbGet<{ a: number | null }>(
+    `SELECT AVG(s.seo_score_avg) as a FROM scans s JOIN domains d ON d.id = s.domain_id WHERE s.seo_score_avg IS NOT NULL AND ${dc.clause}`,
+    dc.params
+  );
   res.json({
-    totalDomains: domains,
-    pagesScanned: pages,
-    issuesDetected: issues,
-    seoScoreAvg: avg.a != null ? Math.round(avg.a * 10) / 10 : null,
+    totalDomains: domainCount,
+    pagesScanned: pagesRow?.c ?? 0,
+    issuesDetected: issuesRow?.c ?? 0,
+    seoScoreAvg: avg?.a != null ? Math.round(avg.a * 10) / 10 : null,
   });
 }
 
-export function getActivity(_req: Request, res: Response): void {
-  const rows = getDb()
-    .prepare('SELECT id, created_at, scan_id, level, message, meta FROM activity_log ORDER BY id DESC LIMIT 100')
-    .all();
+export async function getActivity(req: AuthRequest, res: Response): Promise<void> {
+  const companyId = companyIdFrom(req);
+  let rows;
+  if (companyId != null) {
+    rows = await dbAll(
+      'SELECT id, created_at, scan_id, level, message, meta FROM activity_log WHERE company_id = ? ORDER BY id DESC LIMIT 100',
+      [companyId]
+    );
+  } else {
+    rows = await dbAll(
+      'SELECT id, created_at, scan_id, level, message, meta FROM activity_log ORDER BY id DESC LIMIT 100'
+    );
+  }
   res.json(rows);
 }
 
-export function getSettings(_req: Request, res: Response): void {
-  const keys = [
-    'OPENAI_API_KEY',
-    'GOOGLE_API_KEY',
-    'SERPAPI_KEY',
-    'ENABLE_LIVE_SERP_RANK',
-    'GITHUB_TOKEN',
-    'GITHUB_REPO',
-    'GITHUB_REPO_OWNER',
-    'GITHUB_REPO_NAME',
-    'GITHUB_DEFAULT_BRANCH',
-    'GITHUB_CONTENT_ROOT_FOLDER',
-    'GITHUB_FILE_EXTENSION',
-    'CLAUDE_INSTANCE_ID',
-    'CLAUDE_PR_ENDPOINT',
-    'CLAUDE_API_TOKEN',
-    'EMAIL_HOST',
-    'EMAIL_PORT',
-    'EMAIL_USER',
-    'EMAIL_PASS',
-    'EMAIL_FROM',
-    'REPORT_EMAIL_TO',
-    'scheduler.enabled',
-    'scheduler.frequency',
-    'scheduler.domain',
-    'scheduler.email',
-    'scheduler.rules',
-  ];
-  const out: Record<string, string> = {};
-  for (const k of keys) {
-    const v = getSetting(k) || process.env[k] || '';
+export async function getSettings(req: AuthRequest, res: Response): Promise<void> {
+  const companyId = companyIdFrom(req);
+  if (isMultiTenantEnabled() && companyId == null) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+  if (companyId != null) {
+    const out = await getCompanySettingsForApi(companyId);
+    res.json(out);
+    return;
+  }
+  const { getLegacySetting } = await import('../services/db.service');
+  const out: Record<string, string> = { ...getAppSettingsForApi() };
+  for (const k of SETTINGS_KEYS) {
+    const v = getLegacySetting(k) || process.env[k] || '';
     if (!v) {
       out[k] = '';
       continue;
     }
-    if (k.includes('PASS') || k.includes('TOKEN') || k.includes('KEY')) {
-      out[k] = v.length > 4 ? `****${v.slice(-4)}` : '****';
-    } else {
-      out[k] = v;
-    }
+    out[k] = k.includes('PASS') || k.includes('TOKEN') || k.includes('KEY') ? (v.length > 4 ? `****${v.slice(-4)}` : '****') : v;
   }
   res.json(out);
 }
 
-export function putSettings(req: Request, res: Response): void {
+export async function putSettings(req: AuthRequest, res: Response): Promise<void> {
   const body = req.body as Record<string, string>;
-  const allowed = new Set([
-    'OPENAI_API_KEY',
-    'GOOGLE_API_KEY',
-    'SERPAPI_KEY',
-    'ENABLE_LIVE_SERP_RANK',
-    'GITHUB_TOKEN',
-    'GITHUB_REPO',
-    'GITHUB_REPO_OWNER',
-    'GITHUB_REPO_NAME',
-    'GITHUB_DEFAULT_BRANCH',
-    'GITHUB_CONTENT_ROOT_FOLDER',
-    'GITHUB_FILE_EXTENSION',
-    'CLAUDE_INSTANCE_ID',
-    'CLAUDE_PR_ENDPOINT',
-    'CLAUDE_API_TOKEN',
-    'EMAIL_HOST',
-    'EMAIL_PORT',
-    'EMAIL_USER',
-    'EMAIL_PASS',
-    'EMAIL_FROM',
-    'REPORT_EMAIL_TO',
-    'scheduler.enabled',
-    'scheduler.frequency',
-    'scheduler.domain',
-    'scheduler.email',
-    'scheduler.rules',
-  ]);
+  const allowed = new Set<string>(SETTINGS_KEYS);
+  const partial: Record<string, string> = {};
   for (const [k, v] of Object.entries(body)) {
     if (!allowed.has(k) || typeof v !== 'string') continue;
     if (v.startsWith('****')) continue;
-    setSetting(k, v);
+    partial[k] = v;
   }
+  const companyId = companyIdFrom(req);
+  if (isMultiTenantEnabled() && companyId == null) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+  if (companyId != null) {
+    await mergeCompanySettings(companyId, partial);
+    if (req.auth) req.auth.settings = await getCompanyConfig(companyId);
+    res.json({ ok: true, companyId });
+    return;
+  }
+  const { setLegacySetting } = await import('../services/db.service');
+  for (const [k, v] of Object.entries(partial)) setLegacySetting(k, v);
   res.json({ ok: true });
 }
 
-export async function postGooglePageSpeedTest(req: Request, res: Response): Promise<void> {
+export async function postGooglePageSpeedTest(req: AuthRequest, res: Response): Promise<void> {
   try {
     const url = String((req.body as { url?: string })?.url || 'https://example.com').trim();
     let parsed: URL;
@@ -773,7 +928,7 @@ export async function postGooglePageSpeedTest(req: Request, res: Response): Prom
     if (!metrics) {
       res.status(502).json({
         ok: false,
-        error: 'PageSpeed API call failed. Check GOOGLE_API_KEY quota/restrictions and URL accessibility.',
+        error: 'PageSpeed API call failed. Check Google:ApiKey in appsettings.json and URL accessibility.',
       });
       return;
     }
@@ -789,7 +944,7 @@ export async function postGooglePageSpeedTest(req: Request, res: Response): Prom
   }
 }
 
-export async function postSerpApiTest(req: Request, res: Response): Promise<void> {
+export async function postSerpApiTest(req: AuthRequest, res: Response): Promise<void> {
   try {
     const keyword = String((req.body as { keyword?: string })?.keyword || 'seo audit tools').trim();
     const test = await testSerpApiConnection(keyword);
@@ -799,7 +954,7 @@ export async function postSerpApiTest(req: Request, res: Response): Promise<void
   }
 }
 
-export async function postSerpLiveRank(req: Request, res: Response): Promise<void> {
+export async function postSerpLiveRank(req: AuthRequest, res: Response): Promise<void> {
   try {
     const body = req.body as {
       keyword?: string;
@@ -827,14 +982,19 @@ export async function postSerpLiveRank(req: Request, res: Response): Promise<voi
   }
 }
 
-export async function postIssuePullRequest(req: Request, res: Response): Promise<void> {
+async function issueForCompany(id: number, companyId: number | undefined) {
+  const dc = domainCompanyFilter(companyId);
+  return dbGet(
+    `SELECT i.id, i.scan_id, i.page_url, i.issue_type, i.message, i.code_snippet, i.github_pr_url, i.ai_suggestion, i.github_issue_url
+     FROM issues i JOIN scans s ON s.id = i.scan_id JOIN domains d ON d.id = s.domain_id
+     WHERE i.id = ? AND ${dc.clause}`,
+    [id, ...dc.params]
+  );
+}
+
+export async function postIssuePullRequest(req: AuthRequest, res: Response): Promise<void> {
   const id = Number(req.params.id);
-  const row = getDb()
-    .prepare(
-      `SELECT i.id, i.scan_id, i.page_url, i.issue_type, i.message, i.code_snippet, i.github_pr_url
-       FROM issues i WHERE i.id = ?`
-    )
-    .get(id) as
+  const row = (await issueForCompany(id, companyIdFrom(req))) as
     | {
         id: number;
         scan_id: number;
@@ -874,10 +1034,13 @@ export async function postIssuePullRequest(req: Request, res: Response): Promise
     res.status(502).json({ ok: false, error: pr.error || 'Unable to create pull request' });
     return;
   }
-  getDb()
-    .prepare('UPDATE issues SET github_pr_url = ?, github_pr_branch = ?, status = ? WHERE id = ?')
-    .run(pr.pullRequestUrl, pr.branch || null, 'pr_created', id);
-  logActivity('info', 'GitHub pull request created', undefined, {
+  await dbExecute('UPDATE issues SET github_pr_url = ?, github_pr_branch = ?, status = ? WHERE id = ?', [
+    pr.pullRequestUrl,
+    pr.branch || null,
+    'pr_created',
+    id,
+  ]);
+  await logActivityAsync('info', 'GitHub pull request created', undefined, {
     issueId: id,
     page: row.page_url,
     branch: pr.branch,
@@ -891,11 +1054,9 @@ export async function postIssuePullRequest(req: Request, res: Response): Promise
   });
 }
 
-export async function postIssueGithub(req: Request, res: Response): Promise<void> {
+export async function postIssueGithub(req: AuthRequest, res: Response): Promise<void> {
   const id = Number(req.params.id);
-  const row = getDb()
-    .prepare('SELECT i.id, i.page_url, i.message, i.ai_suggestion, i.github_issue_url FROM issues i WHERE i.id = ?')
-    .get(id) as
+  const row = (await issueForCompany(id, companyIdFrom(req))) as
     | { id: number; page_url: string; message: string; ai_suggestion: string | null; github_issue_url: string | null }
     | undefined;
 
@@ -916,39 +1077,39 @@ export async function postIssueGithub(req: Request, res: Response): Promise<void
   });
   const gh = await createGithubIssue({ title, body });
   if (gh.htmlUrl) {
-    getDb().prepare('UPDATE issues SET github_issue_url = ? WHERE id = ?').run(gh.htmlUrl, id);
-    logActivity('info', 'GitHub issue created', undefined, { issueId: id, url: gh.htmlUrl });
+    await dbExecute('UPDATE issues SET github_issue_url = ? WHERE id = ?', [gh.htmlUrl, id]);
+    await logActivityAsync('info', 'GitHub issue created', undefined, { issueId: id, url: gh.htmlUrl }, companyIdFrom(req));
     res.json({ ok: true, url: gh.htmlUrl, number: gh.number });
   } else {
     res.status(502).json({ ok: false, error: gh.error });
   }
 }
 
-export function getSeoTrend(_req: Request, res: Response): void {
-  const rows = getDb()
-    .prepare(
-      `SELECT s.id, d.domain, s.started_at, s.seo_score_avg FROM scans s
-       JOIN domains d ON d.id = s.domain_id
-       WHERE s.status = 'completed' AND s.seo_score_avg IS NOT NULL
-       ORDER BY s.started_at ASC LIMIT 200`
-    )
-    .all();
+export async function getSeoTrend(req: AuthRequest, res: Response): Promise<void> {
+  const dc = domainCompanyFilter(companyIdFrom(req));
+  const rows = await dbAll(
+    `SELECT s.id, d.domain, s.started_at, s.seo_score_avg FROM scans s
+     JOIN domains d ON d.id = s.domain_id
+     WHERE s.status = 'completed' AND s.seo_score_avg IS NOT NULL AND ${dc.clause}
+     ORDER BY s.started_at ASC LIMIT 200`,
+    dc.params
+  );
   res.json(rows);
 }
 
-export async function postScanClaudePr(req: Request, res: Response): Promise<void> {
+export async function postScanClaudePr(req: AuthRequest, res: Response): Promise<void> {
   const scanId = Number(req.params.scanId);
   if (!Number.isFinite(scanId) || scanId < 1) {
     res.status(400).json({ error: 'Invalid scan id' });
     return;
   }
-  const row = getDb()
-    .prepare(
-      `SELECT s.id, d.domain, s.claude_pr_url
-       FROM scans s JOIN domains d ON d.id = s.domain_id
-       WHERE s.id = ?`
-    )
-    .get(scanId) as { id: number; domain: string; claude_pr_url: string | null } | undefined;
+  const dc = domainCompanyFilter(companyIdFrom(req));
+  const row = await dbGet<{ id: number; domain: string; claude_pr_url: string | null }>(
+    `SELECT s.id, d.domain, s.claude_pr_url
+     FROM scans s JOIN domains d ON d.id = s.domain_id
+     WHERE s.id = ? AND ${dc.clause}`,
+    [scanId, ...dc.params]
+  );
   if (!row) {
     res.status(404).json({ error: 'Scan not found' });
     return;
@@ -962,14 +1123,15 @@ export async function postScanClaudePr(req: Request, res: Response): Promise<voi
     res.status(502).json({ ok: false, error: result.error });
     return;
   }
-  getDb()
-    .prepare(`UPDATE scans SET claude_pr_url = ?, claude_pr_created_at = datetime('now') WHERE id = ?`)
-    .run(result.prUrl, scanId);
-  logActivity('info', 'Claude PR created', scanId, { prUrl: result.prUrl });
+  await dbExecute(`UPDATE scans SET claude_pr_url = ?, claude_pr_created_at = ${sqlNow()} WHERE id = ?`, [
+    result.prUrl,
+    scanId,
+  ]);
+  await logActivityAsync('info', 'Claude PR created', scanId, { prUrl: result.prUrl }, companyIdFrom(req));
   res.json({ ok: true, prUrl: result.prUrl });
 }
 
-export async function postScanClaudePrEmail(req: Request, res: Response): Promise<void> {
+export async function postScanClaudePrEmail(req: AuthRequest, res: Response): Promise<void> {
   const scanId = Number(req.params.scanId);
   const { emailTo } = req.body as { emailTo?: string };
   if (!Number.isFinite(scanId) || scanId < 1) {
@@ -980,13 +1142,13 @@ export async function postScanClaudePrEmail(req: Request, res: Response): Promis
     res.status(400).json({ error: 'emailTo is required' });
     return;
   }
-  const row = getDb()
-    .prepare(
-      `SELECT s.id, d.domain, s.claude_pr_url
-       FROM scans s JOIN domains d ON d.id = s.domain_id
-       WHERE s.id = ?`
-    )
-    .get(scanId) as { id: number; domain: string; claude_pr_url: string | null } | undefined;
+  const dc = domainCompanyFilter(companyIdFrom(req));
+  const row = await dbGet<{ id: number; domain: string; claude_pr_url: string | null }>(
+    `SELECT s.id, d.domain, s.claude_pr_url
+     FROM scans s JOIN domains d ON d.id = s.domain_id
+     WHERE s.id = ? AND ${dc.clause}`,
+    [scanId, ...dc.params]
+  );
   if (!row) {
     res.status(404).json({ error: 'Scan not found' });
     return;
@@ -1004,13 +1166,11 @@ export async function postScanClaudePrEmail(req: Request, res: Response): Promis
     to: emailTo,
   });
   if (!emailResult.ok) {
-    getDb().prepare(`UPDATE scans SET claude_pr_email_error = ? WHERE id = ?`).run(emailResult.error || 'Email failed', scanId);
+    await dbExecute(`UPDATE scans SET claude_pr_email_error = ? WHERE id = ?`, [emailResult.error || 'Email failed', scanId]);
     res.status(502).json({ ok: false, error: emailResult.error || 'Email failed' });
     return;
   }
-  getDb()
-    .prepare(`UPDATE scans SET claude_pr_email_sent_at = datetime('now'), claude_pr_email_error = NULL WHERE id = ?`)
-    .run(scanId);
-  logActivity('info', 'Claude PR link emailed', scanId, { to: emailTo });
+  await dbExecute(`UPDATE scans SET claude_pr_email_sent_at = ${sqlNow()}, claude_pr_email_error = NULL WHERE id = ?`, [scanId]);
+  await logActivityAsync('info', 'Claude PR link emailed', scanId, { to: emailTo }, companyIdFrom(req));
   res.json({ ok: true, message: 'Claude PR link sent by email' });
 }

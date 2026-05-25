@@ -12,6 +12,33 @@ function originFromDomain(domain: string): string {
   return `https://${normalizeDomain(domain)}`;
 }
 
+/** Follow redirects and prefer www when apex has no sitemap (common SPA hosting). */
+async function resolveSiteOrigin(domain: string): Promise<string> {
+  const bare = normalizeDomain(domain).replace(/^www\./, '');
+  const candidates = [`https://${bare}`, `https://www.${bare}`];
+  const tried = new Set<string>();
+
+  for (const start of candidates) {
+    if (tried.has(start)) continue;
+    tried.add(start);
+    try {
+      const res = await fetch(start, {
+        method: 'GET',
+        redirect: 'follow',
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SEOAgentBot/1.0)' },
+        signal: AbortSignal.timeout(15000),
+      });
+      const origin = new URL(res.url).origin;
+      logger.info('Resolved crawl origin', { domain: bare, start, origin, status: res.status });
+      return origin;
+    } catch (e) {
+      logger.debug('resolveSiteOrigin candidate failed', { start, error: String(e) });
+    }
+  }
+
+  return originFromDomain(bare);
+}
+
 function canonicalPathUrl(baseOrigin: string, href: string): string {
   const u = new URL(href, baseOrigin);
   let path = u.pathname || '/';
@@ -257,7 +284,7 @@ function timeoutSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
 
 export async function crawlDomain(domainInput: string, abortSignal?: AbortSignal): Promise<CrawlPageResult[]> {
   const domain = normalizeDomain(domainInput);
-  const baseOrigin = originFromDomain(domain);
+  const baseOrigin = await resolveSiteOrigin(domain);
   const configured = config.maxPagesPerScan;
   const pageLimit = configured <= 0 ? config.maxDiscoverablePages : configured;
   const workerCount = config.crawlWorkers;
@@ -347,7 +374,13 @@ export async function crawlDomain(domainInput: string, abortSignal?: AbortSignal
         .filter(Boolean)
         .slice(0, 15);
       const headings = [h1Text, ...subHeadings].filter(Boolean).slice(0, 16);
-      const links = extractLinks(html, baseOrigin);
+      const links = extractLinks(html, baseOrigin).filter((href) => {
+        try {
+          return new URL(href).origin === baseOrigin;
+        } catch {
+          return false;
+        }
+      });
       const text = stripTags(html);
       const wordCount = text ? text.split(/\s+/).filter(Boolean).length : 0;
       const contentSnippet = text.slice(0, 750);

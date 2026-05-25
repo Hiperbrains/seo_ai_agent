@@ -1,3 +1,9 @@
+:host {
+  display: block;
+  width: 100%;
+  min-height: 100vh;
+}
+
 .shell {
   min-height: 100vh;
   display: grid;
@@ -29,6 +35,43 @@
   .side-nav__link {
     padding: 0.5rem;
   }
+}
+
+.sidebar-user {
+  margin-top: auto;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-user__name {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--heading);
+}
+
+.sidebar-user__email {
+  margin: 0.15rem 0 0.65rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.btn-signout {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-signout:hover {
+  border-color: var(--border-muted);
+  background: #fff;
 }
 
 .sidebar {

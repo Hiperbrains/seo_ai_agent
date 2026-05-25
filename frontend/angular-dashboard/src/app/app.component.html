@@ -1,3 +1,6 @@
+@if (!showShell()) {
+  <router-outlet />
+} @else {
 <div class="shell">
   <aside class="sidebar">
     <a routerLink="/" class="brand brand--link" title="AI SEO Agent — Home">
@@ -73,8 +76,16 @@
         <span>Settings</span>
       </a>
     </nav>
+    @if (auth.multiTenant() && auth.company()) {
+      <div class="sidebar-user">
+        <p class="sidebar-user__name">{{ auth.company()!.companyName }}</p>
+        <p class="sidebar-user__email">{{ auth.company()!.email }}</p>
+        <button type="button" class="btn-signout" (click)="signOut()">Sign out</button>
+      </div>
+    }
   </aside>
   <main class="main">
     <router-outlet />
   </main>
 </div>
+}

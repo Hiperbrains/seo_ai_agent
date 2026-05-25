@@ -48,20 +48,23 @@ export class DomainManagementComponent implements OnInit {
   }
 
   scan(): void {
-    if (!this.scanDomain.trim()) return;
+    const domain = this.scanDomain.trim();
+    if (!domain || this.launching) return;
     this.launching = true;
     this.message = null;
     this.error = null;
     this.api
       .postScan({
-        domain: this.scanDomain.trim(),
+        domain,
         emailTo: this.emailTo.trim() || undefined,
         createGithubIssues: this.createGithub,
       })
       .subscribe({
         next: (r) => {
           this.launching = false;
-          this.message = `Scan started for ${r.domain} (ID ${r.scanId}). You can start another scan now.`;
+          this.message = r.alreadyRunning
+            ? `Scan already running for ${r.domain} (ID ${r.scanId}).`
+            : `Scan started for ${r.domain} (ID ${r.scanId}).`;
         },
         error: (e) => {
           this.launching = false;

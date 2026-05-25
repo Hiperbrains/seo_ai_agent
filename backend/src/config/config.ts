@@ -1,10 +1,13 @@
 import fs from 'fs';
 import dotenv from 'dotenv';
 import path from 'path';
+import { loadAppSettings } from './appsettings';
 
 const envCandidates = [
   path.resolve(process.cwd(), '.env'),
+  path.resolve(process.cwd(), '..', '.env'),
   path.resolve(__dirname, '../../.env'),
+  path.resolve(__dirname, '../../../.env'),
 ];
 for (const p of envCandidates) {
   if (fs.existsSync(p)) {
@@ -18,11 +21,42 @@ function num(v: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Parses .NET-style strings: Server=host;Port=6432;Database=SEOAgent;User Id=u;Password=p; */
+function parseDotNetPgConnectionString(raw: string): string {
+  const parts: Record<string, string> = {};
+  for (const segment of raw.split(';')) {
+    const eq = segment.indexOf('=');
+    if (eq < 1) continue;
+    const key = segment.slice(0, eq).trim().toLowerCase();
+    const value = segment.slice(eq + 1).trim();
+    parts[key] = value;
+  }
+  const host = parts.server || parts.host || parts['data source'] || '';
+  const port = parts.port || '5432';
+  const database = parts.database || parts['initial catalog'] || '';
+  const user = parts['user id'] || parts.userid || parts.username || parts.user || '';
+  const password = parts.password || '';
+  if (!host || !database || !user) return '';
+  const encUser = encodeURIComponent(user);
+  const encPass = encodeURIComponent(password);
+  return `postgresql://${encUser}:${encPass}@${host}:${port}/${database}`;
+}
+
+function resolveDatabaseUrl(): string {
+  if (process.env.DATABASE_URL?.trim()) return process.env.DATABASE_URL.trim();
+  const hiperbrains = process.env.HIPERBRAINS_DATABASE?.trim() || process.env.DATABASE_CONNECTION_STRING?.trim();
+  if (hiperbrains) return parseDotNetPgConnectionString(hiperbrains);
+  return '';
+}
+
+const appSettings = loadAppSettings();
+
 export const config = {
   port: num(process.env.PORT, 3000),
   nodeEnv: process.env.NODE_ENV || 'development',
-  openaiApiKey: process.env.OPENAI_API_KEY || '',
-  googleApiKey: process.env.GOOGLE_API_KEY || process.env.GoogleAPIKey || '',
+  /** Always from appsettings.json — not stored in company_configs DB. */
+  openaiApiKey: appSettings.openaiApiKey,
+  googleApiKey: appSettings.googleApiKey,
   githubToken: process.env.GITHUB_TOKEN || '',
   githubRepo: process.env.GITHUB_REPO || '',
   email: {
@@ -41,12 +75,18 @@ export const config = {
   brokenLinkCheckCap: Math.max(50, num(process.env.BROKEN_LINK_CHECK_CAP, 200)),
   maxDiscoverablePages: Math.max(100, num(process.env.MAX_DISCOVERABLE_PAGES, 500)),
   scanTimeBudgetMs: Math.max(60000, num(process.env.SCAN_TIME_BUDGET_MS, 300000)),
+  /** Hard cap for entire background scan job (crawl + AI + email). */
+  scanPipelineMaxMs: Math.max(120000, num(process.env.SCAN_PIPELINE_MAX_MS, 480000)),
   slowPageMs: num(process.env.SLOW_PAGE_MS, 3000),
   enablePageSpeed: String(process.env.ENABLE_PAGESPEED || 'true').toLowerCase() === 'true',
   pageSpeedPagesLimit: Math.max(0, num(process.env.PAGESPEED_PAGES_LIMIT, 5)),
   pageSpeedStrategy: (process.env.PAGESPEED_STRATEGY || 'mobile').toLowerCase() === 'desktop' ? 'desktop' : 'mobile',
   pageSpeedTimeoutMs: Math.max(5000, num(process.env.PAGESPEED_TIMEOUT_MS, 15000)),
   dbPath: process.env.DB_PATH || path.join(process.cwd(), 'data', 'seo-agent.db'),
+  /** PostgreSQL connection string — enables multi-tenant auth + company-scoped data (public schema). */
+  databaseUrl: resolveDatabaseUrl(),
+  jwtSecret: process.env.JWT_SECRET || 'change-me-in-production-seo-agent',
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   /** Keep scans/issues/reports/activity newer than this many days; `0` disables automatic purge. */
   dataRetentionDays: num(process.env.DATA_RETENTION_DAYS, 7),
   /** When to run retention purge (cron). Default 03:00 UTC daily. */

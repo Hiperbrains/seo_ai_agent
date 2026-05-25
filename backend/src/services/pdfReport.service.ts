@@ -1135,7 +1135,7 @@ export function buildScanReportPdf(meta: ScanPdfMeta, issues: ScanPdfIssueRow[])
       issues.forEach((row, idx) => {
         const solution =
           row.ai_suggestion?.trim() ||
-          'No AI recommendation stored. Re-run scan with OPENAI_API_KEY.';
+          'No AI recommendation stored. Set OpenAI:ApiKey in appsettings.json and re-run scan.';
 
         if (doc.y > doc.page.height - 180) doc.addPage();
 

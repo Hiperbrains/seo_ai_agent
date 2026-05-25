@@ -2,6 +2,7 @@ import { Component, inject, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { httpErrorMessage } from '../../utils/http-error';
 
 @Component({
@@ -13,6 +14,7 @@ import { httpErrorMessage } from '../../utils/http-error';
 })
 export class SettingsComponent implements OnInit {
   private readonly api = inject(ApiService);
+  readonly auth = inject(AuthService);
 
   form: Record<string, string> = {};
   message: string | null = null;
@@ -23,9 +25,10 @@ export class SettingsComponent implements OnInit {
   googleTestRunning = false;
   liveSerpRankEnabled = false;
 
+  /** Read-only — loaded from server appsettings.json */
+  appSettingsKeys = ['OPENAI_API_KEY', 'GOOGLE_API_KEY'] as const;
+
   readonly fields = [
-    { key: 'OPENAI_API_KEY', label: 'OpenAI API key', type: 'password' },
-    { key: 'GOOGLE_API_KEY', label: 'Google API key (PageSpeed)', type: 'password' },
     { key: 'SERPAPI_KEY', label: 'SerpAPI key (live rank)', type: 'password' },
     { key: 'GITHUB_TOKEN', label: 'GitHub token', type: 'password' },
     { key: 'GITHUB_REPO_OWNER', label: 'GitHub repository owner', type: 'text' },
@@ -63,7 +66,9 @@ export class SettingsComponent implements OnInit {
     this.message = null;
     this.error = null;
     this.form['ENABLE_LIVE_SERP_RANK'] = this.liveSerpRankEnabled ? 'true' : 'false';
-    this.api.putSettings(this.form).subscribe({
+    const payload = { ...this.form };
+    for (const k of this.appSettingsKeys) delete payload[k];
+    this.api.putSettings(payload).subscribe({
       next: () => {
         this.message = 'Settings saved on the server (use environment variables in production).';
         this.load();

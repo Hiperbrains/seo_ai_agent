@@ -39,6 +39,17 @@
   box-shadow: var(--shadow-card);
 }
 
+.app-settings-panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+input.readonly {
+  background: var(--bg, #f8fafc);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .field label {
   display: block;
   font-size: 0.85rem;

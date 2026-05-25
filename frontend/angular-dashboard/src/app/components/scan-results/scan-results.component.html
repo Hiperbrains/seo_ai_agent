@@ -27,6 +27,14 @@
       <option value="failed">Failed</option>
     </select>
     <p class="hint">
+      @if (runningScanCount() > 0) {
+        {{ runningScanCount() }} scan(s) running — this page polls <code>/api/reports</code> every 5s until they
+        finish or fail. Stuck scans (e.g. after a backend crash) are marked failed automatically after ~2 minutes.
+      } @else {
+        No scans running — polling is off. Start a scan from <strong>Domains</strong>.
+      }
+    </p>
+    <p class="hint">
       Sending requires SMTP in <strong>Settings</strong> or <code>.env</code> (<code>EMAIL_HOST</code>,
       <code>EMAIL_USER</code>, <code>EMAIL_PASS</code>, etc.).
     </p>
@@ -61,11 +69,16 @@
                 {{ scoreQuality(s.seo_score_avg) }}
               </span>
             </td>
-            <td><span class="pill">{{ s.status }}</span></td>
+            <td>
+              <span class="pill">{{ s.status }}</span>
+              @if ((s.status === 'failed' || s.status === 'stopped') && s.email_error) {
+                <div class="scan-detail err" [title]="s.email_error">{{ s.email_error }}</div>
+              }
+            </td>
             <td>
               @if (s.email_sent) {
                 <span class="ok">Sent {{ s.email_sent_at | date : 'short' }}</span>
-              } @else if (s.email_error) {
+              } @else if (s.email_error && s.status === 'completed') {
                 <span class="err" [title]="s.email_error">Error</span>
               } @else {
                 —
@@ -91,14 +104,21 @@
               }
             </td>
             <td>
-              <a class="pdf-link" [href]="pdfUrl(s.id)" target="_blank" rel="noopener">Download</a>
+              <button
+                type="button"
+                class="pdf-link"
+                (click)="downloadPdf(s)"
+                [disabled]="pdfDownloadingId === s.id"
+              >
+                {{ pdfDownloadingId === s.id ? 'Downloading…' : 'Download' }}
+              </button>
               @if (s.status === 'completed') {
                 <div class="pdf-meta">
                   <span class="live-rank-badge">Live Rank</span>
                 </div>
               }
             </td>
-            <td>
+            <td class="actions-cell">
               <button type="button" (click)="sendReport(s)" [disabled]="busyId === s.id">
                 {{ busyId === s.id ? '…' : 'Send report' }}
               </button>
@@ -107,11 +127,20 @@
                   {{ stoppingScanId === s.id ? 'Stopping…' : 'Stop' }}
                 </button>
               }
-              @if (s.status === 'stopped') {
+              @if (s.status === 'stopped' || s.status === 'failed') {
                 <button type="button" (click)="rerunScan(s)" [disabled]="rerunScanId === s.id">
                   {{ rerunScanId === s.id ? 'Starting…' : 'Re-run' }}
                 </button>
               }
+              <button
+                type="button"
+                class="btn-danger"
+                (click)="deleteScan(s)"
+                [disabled]="deletingScanId === s.id || s.status === 'running'"
+                title="Remove this scan only"
+              >
+                {{ deletingScanId === s.id ? '…' : 'Delete' }}
+              </button>
             </td>
           </tr>
         } @empty {

@@ -9,11 +9,11 @@ import {
   CompetitorGapItem,
   KeywordClusterItem,
 } from '../models/scan.model';
-import { getOpenAiKey } from './secrets.service';
+import { getOpenAiKey, getOpenAiKeyAsync } from './secrets.service';
 import { logger } from '../utils/logger';
 import { config } from '../config/config';
 import type { PageSpeedMetrics } from './pagespeed.service';
-import { getSetting } from './db.service';
+import { getActiveSetting } from './companyConfig.service';
 import { fetchTrendSeedKeywords } from './serpapi.service';
 
 type AggregateAudit = {
@@ -600,7 +600,7 @@ Output schema:
 }
 
 function getProductFeatures(): string[] {
-  const raw = getSetting('PRODUCT_FEATURES') || process.env.PRODUCT_FEATURES || '';
+  const raw = getActiveSetting('PRODUCT_FEATURES') || process.env.PRODUCT_FEATURES || '';
   return raw
     .split(/[,\n|]/)
     .map((x) => x.trim())
@@ -969,7 +969,7 @@ export async function generateTrendKeywordsForDomain(
   );
   const trendMap = buildTrendMap(externalTrendRows);
   const externalTrendSignals = externalTrendRows.map((x) => x.keyword);
-  const key = getOpenAiKey();
+  const key = await getOpenAiKeyAsync();
   if (!key) {
     logger.warn('OpenAI API key missing; trendKeywords not generated (no fallback).', { domain });
     return [];
@@ -1547,7 +1547,7 @@ export async function analyzePagesWithAiWithSignals(
   pages: CrawlPageResult[],
   perfByUrl: Map<string, PageSpeedMetrics>
 ): Promise<Map<string, SeoPageReport>> {
-  const key = getOpenAiKey();
+  const key = await getOpenAiKeyAsync();
   const map = new Map<string, SeoPageReport>();
   const openAiClient = key ? new OpenAI({ apiKey: key }) : null;
 

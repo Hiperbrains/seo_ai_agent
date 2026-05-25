@@ -12,7 +12,10 @@ import {
 } from './aiAnalyzer.service';
 import { createGithubIssue, formatIssueBody } from './github.service';
 import { sendReportEmail } from './email.service';
-import { getDb, getSetting, logActivity } from './db.service';
+import { dbExecute, dbQueryOne, getDriver, logActivity } from './db.service';
+import { ensureCompanySettingsInContext, getActiveSetting } from './companyConfig.service';
+import { getContextCompanyId } from '../context/company.context';
+import { sqlNow } from '../helpers/companyScope';
 import { getEmailConfig } from './secrets.service';
 import { saveScanReportFile } from './reportFile.service';
 import { fetchPageSpeedForUrls } from './pagespeed.service';
@@ -102,24 +105,48 @@ function formatIssueCodeSnippet(issueType: string, source: string): string {
   return `<!-- SEO fix snippet -->\n${raw}`;
 }
 
-export function createScanRecord(domainInput: string, schedulerRun = false): { scanId: number; domain: string } {
+export async function createScanRecord(
+  domainInput: string,
+  companyId?: number,
+  schedulerRun = false
+): Promise<{ scanId: number; domain: string }> {
   const domain = normalizeDomain(domainInput);
-  const db = getDb();
+  const cid = companyId ?? getContextCompanyId();
 
-  let domainRow = db.prepare('SELECT id FROM domains WHERE domain = ?').get(domain) as { id: number } | undefined;
-  if (!domainRow) {
-    const r = db.prepare('INSERT INTO domains (domain) VALUES (?)').run(domain);
-    domainRow = { id: Number(r.lastInsertRowid) };
+  let domainRow: { id: number } | undefined;
+  if (cid != null) {
+    domainRow = await dbQueryOne<{ id: number }>(
+      'SELECT id FROM domains WHERE domain = ? AND company_id = ?',
+      [domain, cid]
+    );
+    if (!domainRow) {
+      const ins = await dbExecute('INSERT INTO domains (company_id, domain) VALUES (?, ?)', [cid, domain]);
+      if (ins.lastInsertId == null) throw new Error('Failed to create domain record (missing insert id).');
+      domainRow = { id: ins.lastInsertId };
+    }
+  } else {
+    domainRow = await dbQueryOne<{ id: number }>('SELECT id FROM domains WHERE domain = ? AND company_id IS NULL', [
+      domain,
+    ]);
+    if (!domainRow) {
+      const ins = await dbExecute('INSERT INTO domains (domain) VALUES (?)', [domain]);
+      if (ins.lastInsertId == null) throw new Error('Failed to create domain record (missing insert id).');
+      domainRow = { id: ins.lastInsertId };
+    }
   }
   const domainId = domainRow.id;
 
   const started = new Date().toISOString();
-  const ins = db
-    .prepare(
-      `INSERT INTO scans (domain_id, started_at, status, scheduler_run) VALUES (?, ?, 'running', ?)`
-    )
-    .run(domainId, started, schedulerRun ? 1 : 0);
-  return { scanId: Number(ins.lastInsertRowid), domain };
+  const schedVal = getDriver() === 'postgres' ? schedulerRun : schedulerRun ? 1 : 0;
+  const ins = await dbExecute(
+    `INSERT INTO scans (domain_id, started_at, status, scheduler_run) VALUES (?, ?, 'running', ?)`,
+    [domainId, started, schedVal]
+  );
+  const scanId = ins.lastInsertId;
+  if (scanId == null || !Number.isFinite(scanId)) {
+    throw new Error('Failed to create scan record (missing insert id).');
+  }
+  return { scanId, domain };
 }
 
 export async function runScanPipeline(domainInput: string, options?: PipelineOptions): Promise<{
@@ -163,13 +190,15 @@ export async function runScanPipeline(
   let scanId = runtime.scanId;
   let domain = normalizeDomain(domainInput);
   if (!scanId) {
-    const created = createScanRecord(domainInput, !!options.schedulerRun);
+    const created = await createScanRecord(domainInput, getContextCompanyId(), !!options.schedulerRun);
     scanId = created.scanId;
     domain = created.domain;
   }
   const effectiveScanId = scanId;
-  const db = getDb();
   const abortSignal = runtime.abortSignal;
+  const now = sqlNow();
+
+  await ensureCompanySettingsInContext();
 
   try {
     throwIfAborted(abortSignal);
@@ -193,9 +222,10 @@ export async function runScanPipeline(
     const scores = [...aiMap.values()].map((a) => a.seoScore).filter((s) => s > 0);
     const seoScoreAvg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
 
-    db.prepare(
-      `UPDATE scans SET completed_at = datetime('now'), pages_count = ?, seo_score_avg = ?, status = 'completed' WHERE id = ?`
-    ).run(pages.length, seoScoreAvg, effectiveScanId);
+    await dbExecute(
+      `UPDATE scans SET completed_at = ${now}, pages_count = ?, seo_score_avg = ?, status = 'completed' WHERE id = ?`,
+      [pages.length, seoScoreAvg, effectiveScanId]
+    );
 
     saveScanReportFile(
       effectiveScanId,
@@ -210,11 +240,7 @@ export async function runScanPipeline(
       topOpportunities,
       pages
     );
-    db.prepare('DELETE FROM issues WHERE scan_id = ?').run(effectiveScanId);
-    const insertIssue = db.prepare(
-      `INSERT INTO issues (scan_id, page_url, issue_type, message, ai_suggestion, status, seo_score, code_snippet, code_diff)
-       VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)`
-    );
+    await dbExecute('DELETE FROM issues WHERE scan_id = ?', [effectiveScanId]);
     for (const rep of Object.values(pageReports)) {
       const byType = new Map<string, string>();
       for (const fix of rep.pasteReadyFixes || []) {
@@ -222,15 +248,19 @@ export async function runScanPipeline(
       }
       for (const issue of rep.issues) {
         const snippet = formatIssueCodeSnippet(issue.type, byType.get(issue.type) || issue.fix || '');
-        insertIssue.run(
-          effectiveScanId,
-          rep.url,
-          issue.type,
-          issue.description,
-          issue.fix,
-          rep.seoScore,
-          snippet,
-          buildIssueDiffPreview(issue.type, snippet)
+        await dbExecute(
+          `INSERT INTO issues (scan_id, page_url, issue_type, message, ai_suggestion, status, seo_score, code_snippet, code_diff)
+           VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+          [
+            effectiveScanId,
+            rep.url,
+            issue.type,
+            issue.description,
+            issue.fix,
+            rep.seoScore,
+            snippet,
+            buildIssueDiffPreview(issue.type, snippet),
+          ]
         );
       }
     }
@@ -258,14 +288,14 @@ export async function runScanPipeline(
       }
     }
 
-    db.prepare('UPDATE scans SET github_issues_created = ? WHERE id = ?').run(githubIssuesCreated, effectiveScanId);
+    await dbExecute('UPDATE scans SET github_issues_created = ? WHERE id = ?', [githubIssuesCreated, effectiveScanId]);
 
     let emailSent = false;
     let emailError: string | null = null;
     const reportTo =
       options.reportEmailTo ||
       process.env.REPORT_EMAIL_TO ||
-      getSetting('REPORT_EMAIL_TO') ||
+      getActiveSetting('REPORT_EMAIL_TO') ||
       getEmailConfig().user;
 
     if (options.sendEmail && reportTo) {
@@ -282,13 +312,14 @@ export async function runScanPipeline(
       emailSent = r.ok;
       emailError = r.error ?? null;
       if (r.ok) {
-        db.prepare(
-          `UPDATE scans SET email_sent = 1, email_sent_at = datetime('now'), email_error = NULL WHERE id = ?`
-        ).run(effectiveScanId);
+        await dbExecute(
+          `UPDATE scans SET email_sent = ${getDriver() === 'postgres' ? 'TRUE' : '1'}, email_sent_at = ${now}, email_error = NULL WHERE id = ?`,
+          [effectiveScanId]
+        );
         logActivity('info', 'Email sent successfully', effectiveScanId, { domain });
         logger.info('Email sent successfully', { scanId: effectiveScanId, domain });
       } else {
-        db.prepare(`UPDATE scans SET email_error = ? WHERE id = ?`).run(emailError, effectiveScanId);
+        await dbExecute(`UPDATE scans SET email_error = ? WHERE id = ?`, [emailError, effectiveScanId]);
         logActivity('warn', 'Email send failed', effectiveScanId, { error: emailError });
       }
     }
@@ -311,11 +342,11 @@ export async function runScanPipeline(
   } catch (e) {
     const isAborted = abortSignal?.aborted || /abort/i.test(String(e));
     const err = isAborted ? 'Stopped by user' : String(e);
-    db.prepare(`UPDATE scans SET status = ?, completed_at = datetime('now'), email_error = ? WHERE id = ?`).run(
+    await dbExecute(`UPDATE scans SET status = ?, completed_at = ${now}, email_error = ? WHERE id = ?`, [
       isAborted ? 'stopped' : 'failed',
       err,
-      effectiveScanId
-    );
+      effectiveScanId,
+    ]);
     logActivity(
       isAborted ? 'warn' : 'error',
       `Scan ${isAborted ? 'stopped' : 'failed'}: ${domain}`,

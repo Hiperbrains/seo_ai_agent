@@ -1,9 +1,9 @@
 import { Component, inject, OnDestroy, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { HttpErrorResponse } from '@angular/common/http';
 import { ApiService, ScanRow } from '../../services/api.service';
 import { httpErrorMessage } from '../../utils/http-error';
-import { environment } from '../../../environments/environment';
 
 @Component({
   selector: 'app-scan-results',
@@ -24,6 +24,8 @@ export class ScanResultsComponent implements OnInit, OnDestroy {
   rerunScanId: number | null = null;
   claudePrBusyId: number | null = null;
   emailPrBusyId: number | null = null;
+  deletingScanId: number | null = null;
+  pdfDownloadingId: number | null = null;
   showPrByScanId: Record<number, boolean> = {};
   message: string | null = null;
   error: string | null = null;
@@ -32,11 +34,31 @@ export class ScanResultsComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.load();
-    this.refreshTimer = setInterval(() => this.load(true), 5000);
   }
 
   ngOnDestroy(): void {
-    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.stopRefreshTimer();
+  }
+
+  /** Poll only while a scan is running — stops when all scans finish or fail. */
+  private syncRefreshTimer(): void {
+    const hasRunning = this.scans.some((s) => s.status === 'running');
+    if (hasRunning && !this.refreshTimer) {
+      this.refreshTimer = setInterval(() => this.load(true), 5000);
+    } else if (!hasRunning) {
+      this.stopRefreshTimer();
+    }
+  }
+
+  runningScanCount(): number {
+    return this.scans.filter((s) => s.status === 'running').length;
+  }
+
+  private stopRefreshTimer(): void {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
   }
 
   load(silent = false): void {
@@ -44,6 +66,7 @@ export class ScanResultsComponent implements OnInit, OnDestroy {
       next: (r) => {
         this.scans = r.scans;
         this.ensureValidPage();
+        this.syncRefreshTimer();
       },
       error: (e) => {
         if (!silent) this.error = httpErrorMessage(e);
@@ -90,9 +113,43 @@ export class ScanResultsComponent implements OnInit, OnDestroy {
     if (this.currentPage < 1) this.currentPage = 1;
   }
 
-  /** Same-origin URL for GET PDF (works with `ng serve` proxy). */
-  pdfUrl(scanId: number): string {
-    return `${environment.apiUrl}/reports/${scanId}/pdf`;
+  downloadPdf(scan: ScanRow): void {
+    if (this.pdfDownloadingId != null) return;
+    this.pdfDownloadingId = scan.id;
+    this.error = null;
+    this.api.downloadReportPdf(scan.id).subscribe({
+      next: (blob) => {
+        this.pdfDownloadingId = null;
+        const safeDomain = scan.domain.replace(/[^\w.-]+/g, '-');
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `seo-report-${safeDomain}-${scan.id}.pdf`;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      },
+      error: (e) => {
+        this.pdfDownloadingId = null;
+        void this.pdfDownloadErrorMessage(e).then((msg) => (this.error = msg));
+      },
+    });
+  }
+
+  private async pdfDownloadErrorMessage(err: unknown): Promise<string> {
+    if (err instanceof HttpErrorResponse && err.error instanceof Blob) {
+      try {
+        const text = await err.error.text();
+        const parsed = JSON.parse(text) as { error?: string };
+        if (parsed.error) return parsed.error;
+        return text || httpErrorMessage(err);
+      } catch {
+        return httpErrorMessage(err);
+      }
+    }
+    return httpErrorMessage(err);
   }
 
   scoreQuality(score: number | null): 'Good' | 'Needs Improvement' | 'Poor' | 'N/A' {
@@ -149,6 +206,11 @@ export class ScanResultsComponent implements OnInit, OnDestroy {
   }
 
   rerunScan(scan: ScanRow): void {
+    if (this.rerunScanId != null) return;
+    if (this.scans.some((s) => s.domain === scan.domain && s.status === 'running')) {
+      this.error = `A scan is already running for ${scan.domain}.`;
+      return;
+    }
     this.rerunScanId = scan.id;
     this.error = null;
     this.message = null;
@@ -159,7 +221,9 @@ export class ScanResultsComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (r) => {
           this.rerunScanId = null;
-          this.message = `Re-run started for ${r.domain} (ID ${r.scanId}).`;
+          this.message = r.alreadyRunning
+            ? `Scan already running for ${r.domain} (ID ${r.scanId}).`
+            : `Re-run started for ${r.domain} (ID ${r.scanId}).`;
           this.load();
         },
         error: (e) => {
@@ -206,6 +270,24 @@ export class ScanResultsComponent implements OnInit, OnDestroy {
     } catch (e) {
       this.error = `Failed to copy PR link: ${String(e)}`;
     }
+  }
+
+  deleteScan(scan: ScanRow): void {
+    if (!confirm(`Delete scan #${scan.id} for ${scan.domain}? This cannot be undone.`)) return;
+    this.deletingScanId = scan.id;
+    this.error = null;
+    this.message = null;
+    this.api.deleteScan(scan.id).subscribe({
+      next: (r) => {
+        this.deletingScanId = null;
+        this.message = r.message || 'Scan deleted.';
+        this.load();
+      },
+      error: (e) => {
+        this.deletingScanId = null;
+        this.error = httpErrorMessage(e);
+      },
+    });
   }
 
   emailPrLink(scan: ScanRow): void {

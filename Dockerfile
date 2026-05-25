@@ -42,9 +42,13 @@ COPY --from=builder /build/backend/node_modules ./node_modules
 COPY --from=builder /build/backend/dist ./dist
 COPY --from=builder /build/backend/assets ./assets
 COPY --from=builder /build/frontend/angular-dashboard/dist ./frontend/angular-dashboard/dist
+# OpenAI + Google keys (mount or bake at deploy; not in DB)
+COPY appsettings.example.json ./appsettings.example.json
 
 RUN mkdir -p /app/data
 
-EXPOSE 3000
+EXPOSE 8080
+
+ENV PORT=8080
 
 CMD ["node", "dist/server.js"]

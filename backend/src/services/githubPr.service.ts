@@ -1,4 +1,4 @@
-import { getSetting } from './db.service';
+import { getActiveSetting } from './companyConfig.service';
 import { getGithubToken } from './secrets.service';
 import { logger } from '../utils/logger';
 
@@ -166,11 +166,11 @@ function normalizeFileExtension(ext: string): string {
 
 function getGithubSettings(): GithubSettings {
   const token = getGithubToken() || '';
-  const owner = getSetting('GITHUB_REPO_OWNER') || '';
-  const repo = getSetting('GITHUB_REPO_NAME') || '';
-  const defaultBranch = getSetting('GITHUB_DEFAULT_BRANCH') || 'main';
-  const contentRootFolder = (getSetting('GITHUB_CONTENT_ROOT_FOLDER') || '').replace(/^\/+|\/+$/g, '');
-  const fileExtension = normalizeFileExtension(getSetting('GITHUB_FILE_EXTENSION') || '.html');
+  const owner = getActiveSetting('GITHUB_REPO_OWNER') || '';
+  const repo = getActiveSetting('GITHUB_REPO_NAME') || '';
+  const defaultBranch = getActiveSetting('GITHUB_DEFAULT_BRANCH') || 'main';
+  const contentRootFolder = (getActiveSetting('GITHUB_CONTENT_ROOT_FOLDER') || '').replace(/^\/+|\/+$/g, '');
+  const fileExtension = normalizeFileExtension(getActiveSetting('GITHUB_FILE_EXTENSION') || '.html');
   return { token, owner, repo, defaultBranch, contentRootFolder, fileExtension };
 }
 
