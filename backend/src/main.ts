@@ -76,9 +76,15 @@ httpServer.on('error', (err: NodeJS.ErrnoException) => {
 
 void initDb()
   .then(async () => {
-    await recoverOrphanedRunningScans();
-    startDataRetentionScheduler();
-    startScheduler();
+    try {
+      await recoverOrphanedRunningScans();
+      startDataRetentionScheduler();
+      startScheduler();
+    } catch (err) {
+      logger.error('Post-init startup failed', {
+        error: String(err instanceof Error ? err.message : err),
+      });
+    }
   })
   .catch((err) => {
     logger.error('Database init failed — API /health up; DB routes may fail', {

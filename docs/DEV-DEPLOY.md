@@ -2,9 +2,24 @@
 
 ## Required GitHub secret
 
-**`APPSETTINGS_JSON`** — paste the full contents of your local `appsettings.json` (with real `ConnectionStrings.Hiperbrains` and API keys).
+**`APPSETTINGS_JSON`** — paste the **entire** contents of your local `appsettings.json` (real `ConnectionStrings.Hiperbrains`, OpenAI/Google keys).
+
+Without this secret, deploy uses `appsettings.example.json` → **SQLite only**, no login (`multiTenant: false`).
+
+From your machine (PowerShell):
+
+```powershell
+cd c:\Users\Amar_Maurya\SEO\seo_ai_agent
+.\scripts\print-appsettings-for-github-secret.ps1
+```
+
+Copy the output → **GitHub repo → Settings → Secrets and variables → Actions → New repository secret** → name `APPSETTINGS_JSON`.
 
 Optional: **`CONFIG_SERVER_DEV`** — config server URL if you use remote config instead.
+
+### Log error `ENOTFOUND HOST`
+
+The old example file used `Server=HOST` as a placeholder. That is no longer merged into `.env`. Set **`APPSETTINGS_JSON`** with your real Postgres connection string.
 
 ## Deploy
 

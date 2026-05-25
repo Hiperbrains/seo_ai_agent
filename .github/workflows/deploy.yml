@@ -109,17 +109,21 @@ jobs:
             echo "Removed appsettings.json directory from a prior failed deploy"
           fi
 
-          if [ ! -f appsettings.json ]; then
-            if [ -n "$APPSETTINGS_JSON" ]; then
-              printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
-              echo "Wrote appsettings.json from APPSETTINGS_JSON secret"
-            elif [ -f appsettings.example.json ]; then
-              cp appsettings.example.json appsettings.json
-              echo "WARN: Using appsettings.example.json — set APPSETTINGS_JSON secret for production keys/DB"
-            else
-              echo "ERROR: appsettings.json missing and no appsettings.example.json in repo."
-              exit 1
-            fi
+          if [ -n "$APPSETTINGS_JSON" ]; then
+            printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
+            echo "Wrote appsettings.json from APPSETTINGS_JSON secret ($(wc -c < appsettings.json) bytes)"
+          elif [ -f appsettings.json ]; then
+            echo "Using appsettings.json from checkout ($(wc -c < appsettings.json) bytes)"
+          elif [ -f appsettings.example.json ]; then
+            cp appsettings.example.json appsettings.json
+            echo "WARN: APPSETTINGS_JSON secret not set — deploy uses SQLite only (no login/Postgres)"
+          else
+            echo "ERROR: appsettings.json missing. Set GitHub secret APPSETTINGS_JSON (paste full appsettings.json)."
+            exit 1
+          fi
+
+          if [ "$ENV" = "DEV" ] && [ -z "$APPSETTINGS_JSON" ]; then
+            echo "::warning::Set repository secret APPSETTINGS_JSON for DEV login + PostgreSQL (Repo Settings → Secrets → Actions)"
           fi
 
           if [ ! -f appsettings.json ]; then
@@ -190,10 +194,17 @@ jobs:
           fi
           echo "Probe listening on 127.0.0.1:${PROBE_PORT}"
 
-          echo "Waiting for /health..."
+          container_health() {
+            docker exec "$1" node -e \
+              "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+              >/dev/null 2>&1
+          }
+
+          echo "Waiting for /health (in-container)..."
+          sleep 3
           healthy=0
-          for i in $(seq 1 30); do
-            if curl -sf "http://127.0.0.1:${PROBE_PORT}/health" >/dev/null; then
+          for i in $(seq 1 40); do
+            if container_health "$NEXT_NAME"; then
               healthy=1
               break
             fi
@@ -202,6 +213,7 @@ jobs:
           if [ "$healthy" -ne 1 ]; then
             echo "ERROR: New container failed health check"
             docker logs "$NEXT_NAME" --tail 80 || true
+            curl -sf "http://127.0.0.1:${PROBE_PORT}/health" -v 2>&1 || true
             docker rm -f "$NEXT_NAME" 2>/dev/null || true
             exit 1
           fi
@@ -273,8 +285,8 @@ jobs:
             "$IMAGE_TAG"
 
           prod_healthy=0
-          for i in $(seq 1 20); do
-            if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+          for i in $(seq 1 25); do
+            if container_health "$CONTAINER_NAME" || curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
               prod_healthy=1
               break
             fi
@@ -287,7 +299,7 @@ jobs:
           fi
 
           ensure_port_up() {
-            if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+            if container_health "$CONTAINER_NAME" 2>/dev/null || curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
               return 0
             fi
             echo "WARN: Port ${PORT} not healthy — emergency start attempts..."

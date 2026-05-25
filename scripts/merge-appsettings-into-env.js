@@ -38,10 +38,19 @@ try {
 const conn = file.ConnectionStrings || file.connectionStrings || {};
 const hiperbrains = (conn.Hiperbrains || conn.hiperbrains || '').trim();
 
+function isPlaceholderConnection(s) {
+  if (!s) return true;
+  const u = s.toUpperCase();
+  return /SERVER=HOST\b/.test(u) || /USER ID=USER\b/.test(u) || /PASSWORD=SECRET\b/.test(u);
+}
+
 let lines = readEnvLines();
-if (hiperbrains) {
+if (hiperbrains && !isPlaceholderConnection(hiperbrains)) {
   lines = upsertEnv(lines, 'HIPERBRAINS_DATABASE', hiperbrains);
   console.log('Merged ConnectionStrings.Hiperbrains into .env');
+} else if (hiperbrains) {
+  lines = lines.filter((l) => !l.startsWith('HIPERBRAINS_DATABASE=') && !l.startsWith('DATABASE_URL='));
+  console.log('WARN: Skipping placeholder ConnectionStrings.Hiperbrains (set APPSETTINGS_JSON secret)');
 } else {
   console.log('WARN: appsettings.json has no ConnectionStrings.Hiperbrains');
 }
