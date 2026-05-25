@@ -159,18 +159,36 @@ jobs:
           fi
 
           NEXT_NAME="${CONTAINER_NAME}-next"
-          PROBE_PORT=$((PORT + 100))
 
+          # Remove stale probe containers (failed runs often leave -next bound to PORT+100)
           docker rm -f "$NEXT_NAME" 2>/dev/null || true
-          echo "Starting probe container on 127.0.0.1:${PROBE_PORT}..."
+          for stale in $(docker ps -aq --filter "name=${CONTAINER_NAME}-next" 2>/dev/null); do
+            docker rm -f "$stale" 2>/dev/null || true
+          done
+
+          echo "Starting probe container (ephemeral host port)..."
           docker run -d \
             --name "$NEXT_NAME" \
-            -p "127.0.0.1:${PROBE_PORT}:8080" \
+            -p "127.0.0.1::8080" \
             --env-file .env \
             -e ConfigUrl="$CONFIG_URL" \
             -v "hiperbrains-${ENV}-data:/app/data" \
             --log-driver=json-file \
             "$IMAGE_TAG"
+
+          PROBE_PORT=""
+          for _ in $(seq 1 15); do
+            PROBE_PORT=$(docker port "$NEXT_NAME" 8080/tcp 2>/dev/null | head -1 | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
+            [ -n "$PROBE_PORT" ] && break
+            sleep 1
+          done
+          if [ -z "$PROBE_PORT" ]; then
+            echo "ERROR: Could not resolve probe container host port"
+            docker logs "$NEXT_NAME" --tail 40 || true
+            docker rm -f "$NEXT_NAME" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Probe listening on 127.0.0.1:${PROBE_PORT}"
 
           echo "Waiting for /health..."
           healthy=0
