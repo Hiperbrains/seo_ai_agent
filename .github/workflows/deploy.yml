@@ -121,12 +121,22 @@ jobs:
           DB_PATH=/app/data/app.db
           EOF
 
+          echo "Loading database settings from config server..."
+          export CONFIG_URL="$CONFIG_URL"
+          node scripts/append-config-to-env.js .env || echo "WARN: config server fetch failed; SQLite legacy mode"
+
+          APPSETTINGS_MOUNT=""
+          if [ -f appsettings.json ]; then
+            APPSETTINGS_MOUNT="-v $(pwd)/appsettings.json:/app/appsettings.json:ro"
+          fi
+
           echo "Starting new container..."
           docker run -d \
             --name "$CONTAINER_NAME" \
             -p "${PORT}:8080" \
             --env-file .env \
             -e ConfigUrl="$CONFIG_URL" \
+            $APPSETTINGS_MOUNT \
             -v "hiperbrains-${ENV}-data:/app/data" \
             --restart unless-stopped \
             --log-driver=awslogs \
