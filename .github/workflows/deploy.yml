@@ -26,6 +26,9 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SECRETKEY }}
       AWS_DEFAULT_REGION: us-east-2
       APPSETTINGS_JSON: ${{ secrets.APPSETTINGS_JSON }}
+      HIPERBRAINS_DATABASE: ${{ secrets.HIPERBRAINS_DATABASE }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
     runs-on:
       - self-hosted
@@ -112,18 +115,22 @@ jobs:
           if [ -n "$APPSETTINGS_JSON" ]; then
             printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
             echo "Wrote appsettings.json from APPSETTINGS_JSON secret ($(wc -c < appsettings.json) bytes)"
+          elif [ -n "$HIPERBRAINS_DATABASE" ]; then
+            export HIPERBRAINS_DATABASE OPENAI_API_KEY GOOGLE_API_KEY
+            node scripts/build-appsettings-from-env.js appsettings.json
+            echo "Built appsettings.json from HIPERBRAINS_DATABASE secret"
           elif [ -f appsettings.json ]; then
             echo "Using appsettings.json from checkout ($(wc -c < appsettings.json) bytes)"
           elif [ -f appsettings.example.json ]; then
             cp appsettings.example.json appsettings.json
-            echo "WARN: APPSETTINGS_JSON secret not set — deploy uses SQLite only (no login/Postgres)"
+            echo "WARN: No APPSETTINGS_JSON or HIPERBRAINS_DATABASE — deploy uses SQLite only (no login/Postgres)"
           else
-            echo "ERROR: appsettings.json missing. Set GitHub secret APPSETTINGS_JSON (paste full appsettings.json)."
+            echo "ERROR: Set GitHub secret APPSETTINGS_JSON or HIPERBRAINS_DATABASE."
             exit 1
           fi
 
-          if [ "$ENV" = "DEV" ] && [ -z "$APPSETTINGS_JSON" ]; then
-            echo "::warning::Set repository secret APPSETTINGS_JSON for DEV login + PostgreSQL (Repo Settings → Secrets → Actions)"
+          if [ "$ENV" = "DEV" ] && [ -z "$APPSETTINGS_JSON" ] && [ -z "$HIPERBRAINS_DATABASE" ]; then
+            echo "::warning::Set APPSETTINGS_JSON or HIPERBRAINS_DATABASE for DEV login + PostgreSQL"
           fi
 
           if [ ! -f appsettings.json ]; then
