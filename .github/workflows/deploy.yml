@@ -69,7 +69,7 @@ jobs:
             main)
               echo "ENV=PROD" >> $GITHUB_ENV
               echo "CONFIG_URL=${{ secrets.CONFIG_SERVER_PROD }}" >> $GITHUB_ENV
-              echo "PORT=8014" >> $GITHUB_ENV
+              echo "PORT=8011" >> $GITHUB_ENV
               ;;
           esac
           echo "GIT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
@@ -108,6 +108,8 @@ jobs:
           echo "Stopping existing container..."
           docker stop "$CONTAINER_NAME" 2>/dev/null || true
           docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+          docker stop SEOAgent 2>/dev/null || true
+          docker rm -f SEOAgent 2>/dev/null || true
 
           echo "Creating volume..."
           docker volume create "hiperbrains-${ENV}-data" || true
