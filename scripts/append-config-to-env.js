@@ -72,14 +72,39 @@ function pick(obj, ...keys) {
     console.log('Config server returned no database settings');
   }
 
-  const openAi = pick(data.OpenAI, 'ApiKey') || pick(data, 'OPENAI_API_KEY');
-  const google = pick(data.Google, 'ApiKey') || pick(data, 'GOOGLE_API_KEY');
-  if (openAi || google) {
-    fs.writeFileSync(
-      'appsettings.json',
-      JSON.stringify({ OpenAI: { ApiKey: openAi || '' }, Google: { ApiKey: google || '' } }, null, 2)
-    );
-    console.log('Wrote appsettings.json from config server');
+  const connStrings = { ...(data.ConnectionStrings || data.connectionStrings || {}) };
+  const openAi =
+    pick(connStrings, 'OpenAI') ||
+    pick(data.OpenAI, 'Connection', 'SecretKey', 'ApiKey') ||
+    pick(data, 'OPENAI_CONNECTION', 'OPENAI_SECRET_KEY', 'OPENAI_API_KEY');
+  const google =
+    pick(connStrings, 'Google') ||
+    pick(data.Google, 'Connection', 'SecretKey', 'ApiKey') ||
+    pick(data, 'GOOGLE_CONNECTION', 'GOOGLE_SECRET_KEY', 'GOOGLE_API_KEY');
+  let existing = {};
+  if (fs.existsSync('appsettings.json') && fs.statSync('appsettings.json').isFile()) {
+    try {
+      existing = JSON.parse(fs.readFileSync('appsettings.json', 'utf8'));
+    } catch {
+      existing = {};
+    }
+  }
+  const conn = { ...(existing.ConnectionStrings || {}), ...merged };
+  if (hiperbrains) conn.Hiperbrains = hiperbrains;
+  if (openAi) conn.OpenAI = openAi;
+  if (google) conn.Google = google;
+  const next = {
+    ConnectionStrings: conn,
+  };
+  if (openAi || google || hiperbrains || dbUrl) {
+    fs.writeFileSync('appsettings.json', `${JSON.stringify(next, null, 2)}\n`);
+    console.log('Merged appsettings.json from config server');
+  }
+
+  if (fs.existsSync('.env')) {
+    require('child_process').execSync('node scripts/merge-appsettings-into-env.js appsettings.json .env', {
+      stdio: 'inherit',
+    });
   }
 })().catch((e) => {
   console.error('Config fetch failed:', e.message);

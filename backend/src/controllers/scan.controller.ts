@@ -928,7 +928,7 @@ export async function postGooglePageSpeedTest(req: AuthRequest, res: Response): 
     if (!metrics) {
       res.status(502).json({
         ok: false,
-        error: 'PageSpeed API call failed. Check Google:ApiKey in appsettings.json and URL accessibility.',
+        error: 'PageSpeed API call failed. Check ConnectionStrings.Google in appsettings.json and URL accessibility.',
       });
       return;
     }

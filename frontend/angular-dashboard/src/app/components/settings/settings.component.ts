@@ -26,7 +26,7 @@ export class SettingsComponent implements OnInit {
   liveSerpRankEnabled = false;
 
   /** Read-only — loaded from server appsettings.json */
-  appSettingsKeys = ['OPENAI_API_KEY', 'GOOGLE_API_KEY'] as const;
+  appSettingsKeys = ['OPENAI_CONNECTION', 'GOOGLE_CONNECTION'] as const;
 
   readonly fields = [
     { key: 'SERPAPI_KEY', label: 'SerpAPI key (live rank)', type: 'password' },

@@ -1,4 +1,4 @@
-/* Global auth layout (imported from styles.scss — must apply to child components) */
+/* Global auth layout (imported from styles.scss) */
 
 app-login,
 app-signup {
@@ -124,33 +124,32 @@ app-auth-hero {
   padding: 48px clamp(24px, 5vw, 80px);
   overflow-y: auto;
   box-sizing: border-box;
+  background: #fff;
+  position: relative;
+  z-index: 1;
 }
 
 .auth-panel__inner {
   width: 100%;
-  max-width: 611px;
+  max-width: 560px;
   margin: 0 auto;
 }
 
-app-signup .auth-panel__inner {
-  max-width: 640px;
-}
-
-.auth-panel__title {
-  margin: 0 0 8px;
+.auth-panel h1.auth-panel__title {
+  margin: 0 0 6px;
   font-family: 'Poppins', system-ui, sans-serif;
-  font-size: clamp(2rem, 4vw, 46px);
+  font-size: 26px;
   font-weight: 500;
-  line-height: 1.1;
-  letter-spacing: -0.92px;
+  line-height: 1.2;
+  letter-spacing: -0.52px;
   color: #101828;
 }
 
 .auth-panel__switch {
-  margin: 0 0 32px;
+  margin: 0 0 14px;
   font-family: 'Poppins', system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.45;
   color: #000;
 }
 
@@ -162,10 +161,10 @@ app-signup .auth-panel__inner {
 }
 
 .auth-panel__hint {
-  margin: 0 0 24px;
+  margin: 0 0 12px;
   font-family: 'Poppins', system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.45;
   color: #000;
 }
 
@@ -177,21 +176,21 @@ app-signup .auth-panel__inner {
 .auth-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 24px 14px;
-  margin-bottom: 24px;
+  gap: 14px 12px;
+  margin-bottom: 16px;
 }
 
 .auth-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .auth-field label {
   font-family: 'Poppins', system-ui, sans-serif;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 20px;
+  line-height: 17px;
   color: #344054;
 }
 
@@ -202,28 +201,47 @@ app-signup .auth-panel__inner {
 .auth-field input,
 .auth-field select {
   width: 100%;
-  height: 50px;
-  padding: 10px 14px;
+  height: 38px;
+  min-height: 38px;
+  padding: 7px 11px;
   border: 1px solid #d0d5dd;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff;
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
   font-family: 'Poppins', system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
+  font-size: 13px;
+  line-height: 17px;
   color: #101828;
   outline: none;
   box-sizing: border-box;
 }
 
 .auth-field input::placeholder {
-  color: #667085;
+  color: #98a2b3;
+  font-size: 13px;
+  line-height: 17px;
+  font-weight: 400;
+}
+
+.auth-field input:-webkit-autofill,
+.auth-field input:-webkit-autofill:hover,
+.auth-field input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #101828;
+  font-size: 13px;
+  line-height: 17px;
+  transition: background-color 9999s ease-out 0s;
+}
+
+.auth-field input:-webkit-autofill::first-line {
+  font-size: 13px;
+  line-height: 17px;
+  font-family: 'Poppins', system-ui, sans-serif;
 }
 
 .auth-field input:focus,
 .auth-field select:focus {
   border-color: #22bd52;
-  box-shadow: 0 0 0 3px rgba(34, 189, 82, 0.15);
+  box-shadow: 0 0 0 2px rgba(34, 189, 82, 0.12);
 }
 
 .auth-field--select {
@@ -232,41 +250,52 @@ app-signup .auth-panel__inner {
 
 .auth-field--select select {
   appearance: none;
-  padding-right: 40px;
+  -webkit-appearance: none;
+  padding-right: 28px;
   cursor: pointer;
+  color: #101828;
+  font-size: 13px;
+}
+
+.auth-field--select select:invalid,
+.auth-field--select select option[value=''] {
+  color: #98a2b3;
+  font-size: 13px;
 }
 
 .auth-field--select .auth-chevron {
   position: absolute;
-  right: 14px;
-  bottom: 15px;
-  width: 20px;
-  height: 20px;
+  right: 10px;
+  top: calc(17px + 4px + 19px);
+  width: 10px;
+  height: 6px;
+  transform: translateY(-50%);
+  object-fit: contain;
   pointer-events: none;
 }
 
 .auth-stack {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  margin-bottom: 24px;
+  gap: 14px;
+  margin-bottom: 16px;
 }
 
 .auth-terms {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  margin: 8px 0 24px;
+  gap: 6px;
+  margin: 0 0 14px;
   font-family: 'Poppins', system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.4;
   color: #000;
 }
 
 .auth-terms input {
-  width: 20px;
-  height: 20px;
-  margin-top: 4px;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
   flex-shrink: 0;
   accent-color: #22bd52;
 }
@@ -279,15 +308,15 @@ app-signup .auth-panel__inner {
 .btn-auth-primary {
   width: 100%;
   max-width: 100%;
-  height: 48px;
+  height: 38px;
   border: 1px solid #22bd52;
-  border-radius: 24px;
+  border-radius: 20px;
   background: #22bd52;
   color: #fff;
   font-family: 'Inter', system-ui, sans-serif;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
-  line-height: 24px;
+  line-height: 17px;
   cursor: pointer;
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
 }
@@ -301,10 +330,11 @@ app-signup .auth-panel__inner {
   background: #fef2f2;
   color: #b42318;
   border: 1px solid #fecaca;
-  padding: 0.65rem 0.75rem;
-  border-radius: 8px;
-  margin-bottom: 1rem;
-  font-size: 0.875rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 10px;
+  line-height: 1.35;
   font-family: 'Poppins', system-ui, sans-serif;
 }
 

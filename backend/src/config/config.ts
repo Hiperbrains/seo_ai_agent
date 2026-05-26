@@ -57,9 +57,9 @@ const appSettings = loadAppSettings();
 export const config = {
   port: num(process.env.PORT, 3000),
   nodeEnv: process.env.NODE_ENV || 'development',
-  /** Always from appsettings.json — not stored in company_configs DB. */
-  openaiApiKey: appSettings.openaiApiKey,
-  googleApiKey: appSettings.googleApiKey,
+  /** Always from appsettings.json ConnectionStrings — not stored in company_configs DB. */
+  openaiConnection: appSettings.openaiConnection,
+  googleConnection: appSettings.googleConnection,
   githubToken: process.env.GITHUB_TOKEN || '',
   githubRepo: process.env.GITHUB_REPO || '',
   email: {

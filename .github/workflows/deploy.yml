@@ -26,6 +26,13 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SECRETKEY }}
       AWS_DEFAULT_REGION: us-east-2
       APPSETTINGS_JSON: ${{ secrets.APPSETTINGS_JSON }}
+      HIPERBRAINS_DATABASE: ${{ secrets.HIPERBRAINS_DATABASE }}
+      OPENAI_CONNECTION: ${{ secrets.OPENAI_CONNECTION }}
+      GOOGLE_CONNECTION: ${{ secrets.GOOGLE_CONNECTION }}
+      OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+      GOOGLE_SECRET_KEY: ${{ secrets.GOOGLE_SECRET_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
     runs-on:
       - self-hosted
@@ -86,6 +93,31 @@ jobs:
           aws sts get-caller-identity
 
       # ------------------------------------------------------------
+      # Free disk (self-hosted runners fill up on --no-cache Playwright builds)
+      # ------------------------------------------------------------
+      - name: Free disk space on runner
+        shell: bash
+        run: |
+          set +e
+          echo "=== Disk before cleanup ==="
+          df -h / /var/lib/docker 2>/dev/null || df -h
+          docker ps -aq --filter "name=seo-agent-" --filter "name=SEOAgent" | xargs -r docker rm -f 2>/dev/null
+          docker image prune -af 2>/dev/null
+          docker container prune -f 2>/dev/null
+          docker volume prune -f 2>/dev/null
+          docker builder prune -af 2>/dev/null
+          docker system prune -af 2>/dev/null
+          if [ -d /actions-runner/_diag ]; then
+            find /actions-runner/_diag -type f -mtime +0 -delete 2>/dev/null
+            find /actions-runner/_diag -type d -empty -delete 2>/dev/null
+          fi
+          if [ -d "${{ github.workspace }}/../_temp" ]; then
+            rm -rf "${{ github.workspace }}/../_temp"/* 2>/dev/null
+          fi
+          echo "=== Disk after cleanup ==="
+          df -h / /var/lib/docker 2>/dev/null || df -h
+
+      # ------------------------------------------------------------
       # Build & Deploy
       # ------------------------------------------------------------
       - name: Build & Deploy Container
@@ -103,63 +135,274 @@ jobs:
           echo "Env       : $ENV"
           echo "====================================="
 
-          if [ ! -f appsettings.json ]; then
-            if [ -n "$APPSETTINGS_JSON" ]; then
-              printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
-              echo "Wrote appsettings.json from APPSETTINGS_JSON secret"
-            else
-              echo "ERROR: appsettings.json missing. Copy it to the runner repo root or set APPSETTINGS_JSON secret."
-              exit 1
-            fi
+          # Self-hosted runners sometimes leave appsettings.json as a directory (breaks docker -v)
+          if [ -e appsettings.json ] && [ ! -f appsettings.json ]; then
+            rm -rf appsettings.json
+            echo "Removed appsettings.json directory from a prior failed deploy"
           fi
 
-          echo "Building image..."
-          docker build --no-cache -t "$IMAGE_TAG" .
+          if [ -n "$APPSETTINGS_JSON" ]; then
+            printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
+            echo "Wrote appsettings.json from APPSETTINGS_JSON secret ($(wc -c < appsettings.json) bytes)"
+          elif [ -n "$HIPERBRAINS_DATABASE" ]; then
+            export HIPERBRAINS_DATABASE OPENAI_CONNECTION GOOGLE_CONNECTION OPENAI_SECRET_KEY GOOGLE_SECRET_KEY OPENAI_API_KEY GOOGLE_API_KEY
+            node scripts/build-appsettings-from-env.js appsettings.json
+            echo "Built appsettings.json from HIPERBRAINS_DATABASE secret"
+          elif [ -f appsettings.json ]; then
+            echo "Using appsettings.json from checkout ($(wc -c < appsettings.json) bytes)"
+          elif [ -f appsettings.example.json ]; then
+            cp appsettings.example.json appsettings.json
+            echo "WARN: No APPSETTINGS_JSON or HIPERBRAINS_DATABASE — deploy uses SQLite only (no login/Postgres)"
+          else
+            echo "ERROR: Set GitHub secret APPSETTINGS_JSON or HIPERBRAINS_DATABASE."
+            exit 1
+          fi
 
-          echo "Stopping existing container..."
-          docker stop "$CONTAINER_NAME" 2>/dev/null || true
-          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-          docker stop SEOAgent 2>/dev/null || true
-          docker rm -f SEOAgent 2>/dev/null || true
+          if [ "$ENV" = "DEV" ] && [ -z "$APPSETTINGS_JSON" ] && [ -z "$HIPERBRAINS_DATABASE" ]; then
+            echo "::warning::Set APPSETTINGS_JSON or HIPERBRAINS_DATABASE for DEV login + PostgreSQL"
+          fi
+
+          if [ ! -f appsettings.json ]; then
+            echo "ERROR: appsettings.json must be a regular file before docker build"
+            exit 1
+          fi
+          echo "appsettings.json OK ($(wc -c < appsettings.json) bytes)"
+
+          CONFIG_BUST=$(md5sum appsettings.json | awk '{print $1}')
+          echo "Building image (layer cache enabled, config hash ${CONFIG_BUST})..."
+          export DOCKER_BUILDKIT=1
+          docker build \
+            --build-arg CONFIG_CACHE_BUST="$CONFIG_BUST" \
+            -t "$IMAGE_TAG" \
+            .
 
           echo "Creating volume..."
           docker volume create "hiperbrains-${ENV}-data" || true
 
           echo "Creating .env file..."
-          cat > .env <<EOF
-          NODE_ENV=production
-          PORT=8080
-          DB_PATH=/app/data/app.db
-          EOF
+          printf '%s\n' \
+            'NODE_ENV=production' \
+            'PORT=8080' \
+            'DB_PATH=/app/data/app.db' \
+            > .env
+
+          node scripts/merge-appsettings-into-env.js appsettings.json .env
 
           echo "Loading database settings from config server..."
-          export CONFIG_URL="$CONFIG_URL"
-          node scripts/append-config-to-env.js .env || echo "WARN: config server fetch failed; SQLite legacy mode"
-
-          APPSETTINGS_MOUNT=""
-          if [ -f appsettings.json ]; then
-            APPSETTINGS_MOUNT="-v $(pwd)/appsettings.json:/app/appsettings.json:ro"
+          if [ -z "$CONFIG_URL" ]; then
+            echo "WARN: CONFIG_URL empty — set CONFIG_SERVER_DEV secret or APPSETTINGS_JSON ConnectionStrings"
+          else
+            export CONFIG_URL="$CONFIG_URL"
+            node scripts/append-config-to-env.js .env || echo "WARN: config server fetch failed"
+            node scripts/merge-appsettings-into-env.js appsettings.json .env
           fi
 
-          echo "Starting new container..."
+          if grep -qE '^HIPERBRAINS_DATABASE=|^DATABASE_URL=' .env 2>/dev/null; then
+            echo "PostgreSQL env configured (multi-tenant / login enabled)"
+          else
+            echo "WARN: No HIPERBRAINS_DATABASE in .env — /api/auth/mode will be multiTenant:false"
+          fi
+
+          NEXT_NAME="${CONTAINER_NAME}-next"
+
+          # Remove stale probe containers (failed runs often leave -next bound to PORT+100)
+          docker rm -f "$NEXT_NAME" 2>/dev/null || true
+          for stale in $(docker ps -aq --filter "name=${CONTAINER_NAME}-next" 2>/dev/null); do
+            docker rm -f "$stale" 2>/dev/null || true
+          done
+
+          echo "Starting probe container (ephemeral host port)..."
           docker run -d \
-            --name "$CONTAINER_NAME" \
-            -p "${PORT}:8080" \
+            --name "$NEXT_NAME" \
+            -p "127.0.0.1::8080" \
             --env-file .env \
             -e ConfigUrl="$CONFIG_URL" \
-            $APPSETTINGS_MOUNT \
+            -v "hiperbrains-${ENV}-data:/app/data" \
+            --log-driver=json-file \
+            "$IMAGE_TAG"
+
+          PROBE_PORT=""
+          for _ in $(seq 1 15); do
+            PROBE_PORT=$(docker port "$NEXT_NAME" 8080/tcp 2>/dev/null | head -1 | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
+            [ -n "$PROBE_PORT" ] && break
+            sleep 1
+          done
+          if [ -z "$PROBE_PORT" ]; then
+            echo "ERROR: Could not resolve probe container host port"
+            docker logs "$NEXT_NAME" --tail 40 || true
+            docker rm -f "$NEXT_NAME" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Probe listening on 127.0.0.1:${PROBE_PORT}"
+
+          container_health() {
+            docker exec "$1" node -e \
+              "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+              >/dev/null 2>&1
+          }
+
+          echo "Waiting for /health (in-container)..."
+          sleep 3
+          healthy=0
+          for i in $(seq 1 40); do
+            if container_health "$NEXT_NAME"; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "ERROR: New container failed health check"
+            docker logs "$NEXT_NAME" --tail 80 || true
+            curl -sf "http://127.0.0.1:${PROBE_PORT}/health" -v 2>&1 || true
+            docker rm -f "$NEXT_NAME" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Health check passed"
+          docker rm -f "$NEXT_NAME" 2>/dev/null || true
+
+          PREVIOUS_IMAGE=""
+          if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            PREVIOUS_IMAGE=$(docker inspect "$CONTAINER_NAME" --format '{{.Config.Image}}' 2>/dev/null || true)
+          fi
+          if [ -z "$PREVIOUS_IMAGE" ]; then
+            PREVIOUS_IMAGE=$(docker images --format '{{.Repository}}:{{.Tag}}' \
+              | grep -E "^${IMAGE_NAME}:${ENV}-" \
+              | grep -v "$IMAGE_TAG" \
+              | head -n 1 || true)
+          fi
+          echo "Previous image (rollback): ${PREVIOUS_IMAGE:-none}"
+
+          rollback_previous() {
+            if [ -z "$PREVIOUS_IMAGE" ]; then
+              echo "WARN: No previous image to roll back"
+              return 1
+            fi
+            echo "Rolling back to $PREVIOUS_IMAGE on port ${PORT}..."
+            docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              -p "0.0.0.0:${PORT}:8080" \
+              --env-file .env \
+              -e ConfigUrl="$CONFIG_URL" \
+              -v "hiperbrains-${ENV}-data:/app/data" \
+              --restart unless-stopped \
+              --log-driver=json-file \
+              "$PREVIOUS_IMAGE"
+            sleep 3
+            if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+              echo "Rollback healthy — site restored on previous image"
+              return 0
+            fi
+            echo "ERROR: Rollback container also failed health check"
+            docker logs "$CONTAINER_NAME" --tail 80 || true
+            return 1
+          }
+
+          free_port() {
+            local p="$1"
+            for cid in $(docker ps -q --filter "publish=${p}" 2>/dev/null); do
+              echo "Removing container ${cid} bound to port ${p}"
+              docker rm -f "$cid" 2>/dev/null || true
+            done
+          }
+
+          echo "Stopping old containers..."
+          docker stop "$CONTAINER_NAME" 2>/dev/null || true
+          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+          docker stop SEOAgent 2>/dev/null || true
+          docker rm -f SEOAgent 2>/dev/null || true
+          free_port "$PORT"
+
+          echo "Starting production container on port ${PORT}..."
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            -p "0.0.0.0:${PORT}:8080" \
+            --env-file .env \
+            -e ConfigUrl="$CONFIG_URL" \
             -v "hiperbrains-${ENV}-data:/app/data" \
             --restart unless-stopped \
-            --log-driver=awslogs \
-            --log-opt awslogs-region=us-east-2 \
-            --log-opt awslogs-group=hiperbrains-api \
-            --log-opt awslogs-create-group=true \
-            --log-opt awslogs-stream="$CONTAINER_NAME" \
+            --log-driver=json-file \
             "$IMAGE_TAG"
+
+          prod_healthy=0
+          for i in $(seq 1 25); do
+            if container_health "$CONTAINER_NAME" || curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+              prod_healthy=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$prod_healthy" -ne 1 ]; then
+            echo "ERROR: Production container not healthy on port ${PORT}"
+            docker logs "$CONTAINER_NAME" --tail 80 || true
+            rollback_previous || true
+          fi
+
+          ensure_port_up() {
+            if container_health "$CONTAINER_NAME" 2>/dev/null || curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+              return 0
+            fi
+            echo "WARN: Port ${PORT} not healthy — emergency start attempts..."
+            free_port "$PORT"
+            docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            for img in "$IMAGE_TAG" "$PREVIOUS_IMAGE"; do
+              [ -z "$img" ] && continue
+              echo "Trying image $img on port ${PORT}..."
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                -p "0.0.0.0:${PORT}:8080" \
+                --env-file .env \
+                -e ConfigUrl="$CONFIG_URL" \
+                -v "hiperbrains-${ENV}-data:/app/data" \
+                --restart unless-stopped \
+                --log-driver=json-file \
+                "$img" || continue
+              for _ in $(seq 1 25); do
+                if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+                  echo "Emergency start OK with $img"
+                  return 0
+                fi
+                sleep 2
+              done
+              docker logs "$CONTAINER_NAME" --tail 40 || true
+              docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+              free_port "$PORT"
+            done
+            if [ -f .env ]; then
+              grep -vE '^(HIPERBRAINS_DATABASE|DATABASE_URL)=' .env > .env.sqlite-fallback 2>/dev/null || cp .env .env.sqlite-fallback
+              echo "Trying SQLite-only .env (no Postgres)..."
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                -p "0.0.0.0:${PORT}:8080" \
+                --env-file .env.sqlite-fallback \
+                -e ConfigUrl="$CONFIG_URL" \
+                -v "hiperbrains-${ENV}-data:/app/data" \
+                --restart unless-stopped \
+                --log-driver=json-file \
+                "$IMAGE_TAG" || true
+              for _ in $(seq 1 25); do
+                if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null; then
+                  echo "Emergency start OK (SQLite fallback — set APPSETTINGS_JSON for login)"
+                  return 0
+                fi
+                sleep 2
+              done
+              docker logs "$CONTAINER_NAME" --tail 40 || true
+            fi
+            return 1
+          }
+
+          if ! ensure_port_up; then
+            echo "ERROR: Could not bring service up on port ${PORT}"
+            docker ps -a | head -20 || true
+            exit 1
+          fi
 
           echo "Cleaning unused images..."
           docker image prune -f
 
           echo "====================================="
-          echo "Deploy complete: $CONTAINER_NAME on port $PORT"
+          echo "Deploy complete: http://127.0.0.1:${PORT}/health OK"
+          echo "Public: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${PORT}/health"
           echo "====================================="

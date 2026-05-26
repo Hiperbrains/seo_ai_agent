@@ -12,7 +12,17 @@ import {
 const SECRET_KEY_SUFFIXES = ['PASS', 'TOKEN', 'KEY'];
 
 /** Stored only in appsettings.json — never in company_configs / legacy settings table. */
-export const APP_SETTINGS_ONLY_KEYS = ['OPENAI_API_KEY', 'GOOGLE_API_KEY', 'GoogleAPIKey'] as const;
+export const APP_SETTINGS_ONLY_KEYS = [
+  'OPENAI_CONNECTION',
+  'GOOGLE_CONNECTION',
+  'OPENAI_SECRET_KEY',
+  'GOOGLE_SECRET_KEY',
+  'OPENAI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GoogleConnection',
+  'GoogleSecretKey',
+  'GoogleAPIKey',
+] as const;
 
 export const SETTINGS_KEYS = [
   'SERPAPI_KEY',
@@ -94,8 +104,8 @@ export async function mergeCompanySettings(companyId: number, partial: Record<st
 /** Masked OpenAI/Google keys from appsettings.json (read-only in API). */
 export function getAppSettingsForApi(): Record<string, string> {
   return {
-    OPENAI_API_KEY: config.openaiApiKey ? maskSecretValue(config.openaiApiKey) : '',
-    GOOGLE_API_KEY: config.googleApiKey ? maskSecretValue(config.googleApiKey) : '',
+    OPENAI_CONNECTION: config.openaiConnection ? maskSecretValue(config.openaiConnection) : '',
+    GOOGLE_CONNECTION: config.googleConnection ? maskSecretValue(config.googleConnection) : '',
   };
 }
 

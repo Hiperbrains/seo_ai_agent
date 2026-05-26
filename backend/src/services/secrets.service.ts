@@ -6,19 +6,28 @@ function setting(key: string): string {
   return getActiveSetting(key) || getLegacySetting(key) || '';
 }
 
-/** OpenAI key — always from appsettings.json (see config.openaiApiKey). */
-export function getOpenAiKey(): string {
-  return config.openaiApiKey.trim();
+/** OpenAI connection — from appsettings.json ConnectionStrings.OpenAI. */
+export function getOpenAiConnection(): string {
+  return config.openaiConnection.trim();
 }
 
-export async function getOpenAiKeyAsync(): Promise<string> {
-  return config.openaiApiKey.trim();
+export async function getOpenAiConnectionAsync(): Promise<string> {
+  return config.openaiConnection.trim();
 }
 
-/** Google PageSpeed key — always from appsettings.json (see config.googleApiKey). */
-export function getGoogleApiKey(): string {
-  return config.googleApiKey.trim();
+/** @deprecated Use getOpenAiConnection */
+export const getOpenAiKey = getOpenAiConnection;
+
+/** @deprecated Use getOpenAiConnectionAsync */
+export const getOpenAiKeyAsync = getOpenAiConnectionAsync;
+
+/** Google PageSpeed connection — from appsettings.json ConnectionStrings.Google. */
+export function getGoogleConnection(): string {
+  return config.googleConnection.trim();
 }
+
+/** @deprecated Use getGoogleConnection */
+export const getGoogleApiKey = getGoogleConnection;
 
 export function getGithubToken(): string {
   return config.githubToken || setting('GITHUB_TOKEN') || '';
