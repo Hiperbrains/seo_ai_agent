@@ -18,11 +18,27 @@ function applyEnv(key: string, value: string): void {
   process.env[key] = value;
 }
 
+function pickOpenAiConnection(data: JsonRecord): string {
+  const conn = (data.ConnectionStrings || data.connectionStrings) as JsonRecord | undefined;
+  return (
+    pickString(conn, 'OpenAI', 'openAI') ||
+    pickString(data.OpenAI as JsonRecord | undefined, 'Connection', 'SecretKey', 'ApiKey') ||
+    pickString(data, 'OPENAI_CONNECTION', 'OPENAI_SECRET_KEY', 'OPENAI_API_KEY')
+  );
+}
+
+function pickGoogleConnection(data: JsonRecord): string {
+  const conn = (data.ConnectionStrings || data.connectionStrings) as JsonRecord | undefined;
+  return (
+    pickString(conn, 'Google', 'google') ||
+    pickString(data.Google as JsonRecord | undefined, 'Connection', 'SecretKey', 'ApiKey') ||
+    pickString(data, 'GOOGLE_CONNECTION', 'GOOGLE_SECRET_KEY', 'GOOGLE_API_KEY')
+  );
+}
+
 function writeAppSettings(data: JsonRecord): void {
-  const openAi =
-    pickString(data.OpenAI as JsonRecord | undefined, 'ApiKey') || pickString(data, 'OPENAI_API_KEY');
-  const google =
-    pickString(data.Google as JsonRecord | undefined, 'ApiKey') || pickString(data, 'GOOGLE_API_KEY');
+  const openAi = pickOpenAiConnection(data);
+  const google = pickGoogleConnection(data);
   const connRemote = (data.ConnectionStrings || data.connectionStrings) as JsonRecord | undefined;
   const hiperbrains =
     pickString(connRemote, 'Hiperbrains', 'hiperbrains') || pickString(data, 'HIPERBRAINS_DATABASE');
@@ -39,15 +55,12 @@ function writeAppSettings(data: JsonRecord): void {
   const existingConn = (existing.ConnectionStrings || {}) as JsonRecord;
   if (!openAi && !google && !hiperbrains) return;
 
-  const file = {
-    ...existing,
-    OpenAI: { ApiKey: openAi || pickString(existing.OpenAI as JsonRecord | undefined, 'ApiKey') },
-    Google: { ApiKey: google || pickString(existing.Google as JsonRecord | undefined, 'ApiKey') },
-    ConnectionStrings: {
-      ...existingConn,
-      ...(hiperbrains ? { Hiperbrains: hiperbrains } : {}),
-    },
-  };
+  const connectionStrings: JsonRecord = { ...existingConn };
+  if (hiperbrains) connectionStrings.Hiperbrains = hiperbrains;
+  if (openAi) connectionStrings.OpenAI = openAi;
+  if (google) connectionStrings.Google = google;
+
+  const file = { ConnectionStrings: connectionStrings };
   fs.writeFileSync(target, `${JSON.stringify(file, null, 2)}\n`, 'utf8');
   logger.info('Merged appsettings.json from remote config');
 }

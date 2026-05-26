@@ -27,6 +27,10 @@ jobs:
       AWS_DEFAULT_REGION: us-east-2
       APPSETTINGS_JSON: ${{ secrets.APPSETTINGS_JSON }}
       HIPERBRAINS_DATABASE: ${{ secrets.HIPERBRAINS_DATABASE }}
+      OPENAI_CONNECTION: ${{ secrets.OPENAI_CONNECTION }}
+      GOOGLE_CONNECTION: ${{ secrets.GOOGLE_CONNECTION }}
+      OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+      GOOGLE_SECRET_KEY: ${{ secrets.GOOGLE_SECRET_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
@@ -141,7 +145,7 @@ jobs:
             printf '%s\n' "$APPSETTINGS_JSON" > appsettings.json
             echo "Wrote appsettings.json from APPSETTINGS_JSON secret ($(wc -c < appsettings.json) bytes)"
           elif [ -n "$HIPERBRAINS_DATABASE" ]; then
-            export HIPERBRAINS_DATABASE OPENAI_API_KEY GOOGLE_API_KEY
+            export HIPERBRAINS_DATABASE OPENAI_CONNECTION GOOGLE_CONNECTION OPENAI_SECRET_KEY GOOGLE_SECRET_KEY OPENAI_API_KEY GOOGLE_API_KEY
             node scripts/build-appsettings-from-env.js appsettings.json
             echo "Built appsettings.json from HIPERBRAINS_DATABASE secret"
           elif [ -f appsettings.json ]; then

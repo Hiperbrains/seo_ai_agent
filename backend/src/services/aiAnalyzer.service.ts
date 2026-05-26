@@ -9,7 +9,7 @@ import {
   CompetitorGapItem,
   KeywordClusterItem,
 } from '../models/scan.model';
-import { getOpenAiKey, getOpenAiKeyAsync } from './secrets.service';
+import { getOpenAiConnection, getOpenAiConnectionAsync } from './secrets.service';
 import { logger } from '../utils/logger';
 import { config } from '../config/config';
 import type { PageSpeedMetrics } from './pagespeed.service';
@@ -969,7 +969,7 @@ export async function generateTrendKeywordsForDomain(
   );
   const trendMap = buildTrendMap(externalTrendRows);
   const externalTrendSignals = externalTrendRows.map((x) => x.keyword);
-  const key = await getOpenAiKeyAsync();
+  const key = await getOpenAiConnectionAsync();
   if (!key) {
     logger.warn('OpenAI API key missing; trendKeywords not generated (no fallback).', { domain });
     return [];
@@ -1547,7 +1547,7 @@ export async function analyzePagesWithAiWithSignals(
   pages: CrawlPageResult[],
   perfByUrl: Map<string, PageSpeedMetrics>
 ): Promise<Map<string, SeoPageReport>> {
-  const key = await getOpenAiKeyAsync();
+  const key = await getOpenAiConnectionAsync();
   const map = new Map<string, SeoPageReport>();
   const openAiClient = key ? new OpenAI({ apiKey: key }) : null;
 

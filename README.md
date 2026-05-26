@@ -23,7 +23,7 @@ Copy `.env.example` to `.env` and set:
 
 | Variable | Purpose |
 |----------|---------|
-| `appsettings.json` | OpenAI + Google API keys (see `appsettings.example.json`; not stored in DB) |
+| `appsettings.json` | OpenAI + Google connections (`ConnectionStrings.OpenAI`, `ConnectionStrings.Google`; see `appsettings.example.json`; not stored in DB) |
 | `GITHUB_TOKEN` | GitHub PAT with `repo` scope for target repo |
 | `GITHUB_REPO` | `owner/repo` |
 | `EMAIL_*` | SMTP settings |

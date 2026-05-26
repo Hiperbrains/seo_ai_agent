@@ -4,14 +4,22 @@ import path from 'path';
 export interface ConnectionStrings {
   Hiperbrains?: string;
   ConnectionStringRoomService?: string;
+  OpenAI?: string;
+  Google?: string;
 }
 
 export interface AppSettingsFile {
-  OpenAI?: { ApiKey?: string };
-  Google?: { ApiKey?: string };
+  ConnectionStrings?: ConnectionStrings;
+  /** @deprecated Use ConnectionStrings.OpenAI */
+  OpenAI?: { Connection?: string; SecretKey?: string; ApiKey?: string };
+  /** @deprecated Use ConnectionStrings.Google */
+  Google?: { Connection?: string; SecretKey?: string; ApiKey?: string };
+  OPENAI_CONNECTION?: string;
+  GOOGLE_CONNECTION?: string;
+  OPENAI_SECRET_KEY?: string;
+  GOOGLE_SECRET_KEY?: string;
   OPENAI_API_KEY?: string;
   GOOGLE_API_KEY?: string;
-  ConnectionStrings?: ConnectionStrings;
 }
 
 const APPSETTINGS_CANDIDATES = [
@@ -34,17 +42,42 @@ function readAppSettingsFile(): AppSettingsFile {
   }
 }
 
-/** OpenAI + Google keys — always from appsettings.json (never company_configs DB). */
+function pickLegacyOpenAi(file: AppSettingsFile): string {
+  return (
+    file.OpenAI?.Connection ||
+    file.OpenAI?.SecretKey ||
+    file.OpenAI?.ApiKey ||
+    file.OPENAI_CONNECTION ||
+    file.OPENAI_SECRET_KEY ||
+    file.OPENAI_API_KEY ||
+    ''
+  ).trim();
+}
+
+function pickLegacyGoogle(file: AppSettingsFile): string {
+  return (
+    file.Google?.Connection ||
+    file.Google?.SecretKey ||
+    file.Google?.ApiKey ||
+    file.GOOGLE_CONNECTION ||
+    file.GOOGLE_SECRET_KEY ||
+    file.GOOGLE_API_KEY ||
+    ''
+  ).trim();
+}
+
+/** OpenAI + Google connections — always from appsettings.json (never company_configs DB). */
 export function loadAppSettings(): {
-  openaiApiKey: string;
-  googleApiKey: string;
+  openaiConnection: string;
+  googleConnection: string;
   hiperbrainsDatabase: string;
   connectionStringRoomService: string;
 } {
   const file = readAppSettingsFile();
-  const openaiApiKey = (file.OpenAI?.ApiKey || file.OPENAI_API_KEY || '').trim();
-  const googleApiKey = (file.Google?.ApiKey || file.GOOGLE_API_KEY || '').trim();
-  const hiperbrainsDatabase = (file.ConnectionStrings?.Hiperbrains || '').trim();
-  const connectionStringRoomService = (file.ConnectionStrings?.ConnectionStringRoomService || '').trim();
-  return { openaiApiKey, googleApiKey, hiperbrainsDatabase, connectionStringRoomService };
+  const conn = file.ConnectionStrings || {};
+  const openaiConnection = (conn.OpenAI || pickLegacyOpenAi(file)).trim();
+  const googleConnection = (conn.Google || pickLegacyGoogle(file)).trim();
+  const hiperbrainsDatabase = (conn.Hiperbrains || '').trim();
+  const connectionStringRoomService = (conn.ConnectionStringRoomService || '').trim();
+  return { openaiConnection, googleConnection, hiperbrainsDatabase, connectionStringRoomService };
 }

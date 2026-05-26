@@ -2,7 +2,7 @@
   <header class="page-head">
     <h1>Settings</h1>
     <p class="muted">
-      OpenAI and Google API keys are read from <code>appsettings.json</code> on the server (not stored in the database).
+      OpenAI and Google connections are read from <code>appsettings.json</code> on the server (not stored in the database).
       All other settings are stored per company in <code>company_configs</code> (JSON), keyed by
       <code>company_id</code>@if (auth.company(); as c) { — yours is <strong>{{ c.id }}</strong> ({{ c.companyName }}) }.
     </p>
@@ -20,7 +20,7 @@
     <p class="muted">Edit <code>appsettings.json</code> on the API host and restart the backend. Values below are read-only.</p>
     @for (k of appSettingsKeys; track k) {
       <div class="field">
-        <label [for]="'app-' + k">{{ k === 'OPENAI_API_KEY' ? 'OpenAI API key' : 'Google API key (PageSpeed)' }}</label>
+        <label [for]="'app-' + k">{{ k === 'OPENAI_CONNECTION' ? 'OpenAI connection' : 'Google connection (PageSpeed)' }}</label>
         <input
           [id]="'app-' + k"
           type="text"
